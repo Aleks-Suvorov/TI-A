@@ -232,6 +232,12 @@ class ExogenousSnapshot:
     #: Days until the next scheduled high-impact event for this instrument.
     #: 0 means the event lands inside the current bar.
     days_to_event: float | None = None
+    #: Measured relative effective spread, e.g. 0.0002 for two basis points.
+    #: Strongly preferred over the range-based estimator when available: any
+    #: broker or exchange feed knows the real spread, whereas estimating it from
+    #: OHLC alone cannot resolve spreads far below a bar's own volatility and is
+    #: deliberately conservative there. See ``docs/09-ASSUMPTIONS.md``.
+    spread: float | None = None
     #: Coarse dealer-gamma imbalance in ``[-1, +1]``; see the positioning
     #: engine's data contract. Default OFF because public estimates are poor.
     gamma_imbalance: float | None = None

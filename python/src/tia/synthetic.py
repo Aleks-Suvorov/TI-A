@@ -103,17 +103,23 @@ def bars_from_arrays(
         lo_true = float(np.exp(min(path.min(), lo_o, lo_c)))
         hi = hi_true * (1.0 + half_spread)
         lo = lo_true * (1.0 - half_spread)
+        # The close is a *transaction* price, not the mid: it prints on the bid
+        # or the ask with equal probability. This is what a real close is, and
+        # the Abdi-Ranaldo estimator's derivation depends on it -- fed a series
+        # of mids, that estimator understates the spread by roughly half.
+        c_obs = c * (1.0 + half_spread * (1.0 if rng.random() < 0.5 else -1.0))
+        c_obs = min(max(c_obs, lo), hi)
         bars.append(
             Bar(
                 timestamp=start_ts + i * step_s,
                 open=o,
-                high=max(hi, o, c),
-                low=min(lo, o, c),
-                close=c,
+                high=max(hi, o, c_obs),
+                low=min(lo, o, c_obs),
+                close=c_obs,
                 volume=float(max(volume[i], 1.0)),
             )
         )
-        prev = c
+        prev = c_obs
     return bars
 
 

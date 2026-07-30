@@ -273,15 +273,45 @@ class EdgeBook:
             cell=label,
         )
 
+    @staticmethod
+    def _minus(a: _Cell, b: _Cell) -> _Cell:
+        """``a`` with ``b``'s contribution removed. Both must share a clock."""
+        out = _Cell()
+        out.n_w = max(a.n_w - b.n_w, 0.0)
+        out.s1 = a.s1 - b.s1
+        out.s2 = max(a.s2 - b.s2, 0.0)
+        out.t_last = a.t_last
+        if out.n_w <= 0.0:
+            out.s1 = out.s2 = 0.0
+        return out
+
     def estimate(self, regime: int, setup: int, bucket: int) -> EdgeEstimate:
-        """Posterior expectancy for one cell, shrunk through the hierarchy."""
+        """Posterior expectancy for one cell, shrunk through the hierarchy.
+
+        Shrinkage is **leave-one-out**: a cell's prior comes from its parent's
+        evidence *excluding the cell's own*, and the parent's prior likewise
+        excludes the parent's. Without that exclusion the same observations set
+        the prior and then update against it, so each level re-counts them --
+        five observations of +2 sigma produced a posterior mean of 0.77 instead
+        of 0.33, and the resulting credible bound cleared a gate it had no
+        business clearing. Using data twice is exactly the error the whole
+        architecture is built to avoid, and a hierarchy makes it easy to commit
+        by accident.
+        """
         c = self.cfg
-        root = self._posterior(
-            self._root, c.edge_prior_mean_sigma, c.edge_prior_strength, "global"
-        )
-        node_cell = self._node.setdefault((regime, setup), _Cell())
-        node = self._posterior(node_cell, root.mean, c.edge_pooling_strength, f"r{regime}/s{setup}")
         leaf_cell = self._leaf.setdefault((regime, setup, bucket), _Cell())
+        node_cell = self._node.setdefault((regime, setup), _Cell())
+        for cell in (leaf_cell, node_cell, self._root):
+            cell.decay_to(self._clock, self._lam)
+
+        root_excl = self._minus(self._root, node_cell)
+        root = self._posterior(
+            root_excl, c.edge_prior_mean_sigma, c.edge_prior_strength, "global"
+        )
+        node_excl = self._minus(node_cell, leaf_cell)
+        node = self._posterior(
+            node_excl, root.mean, c.edge_pooling_strength, f"r{regime}/s{setup}"
+        )
         return self._posterior(
             leaf_cell, node.mean, c.edge_pooling_strength, f"r{regime}/s{setup}/b{bucket}"
         )

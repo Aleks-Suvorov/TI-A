@@ -195,9 +195,19 @@ class TIA:
         edge = self.edge_book.estimate(int(st.dominant), int(setup), bucket)
 
         stress_mult = 1.0 + 1.5 * posterior[int(Regime.STRESS)]
+        # A measured spread always beats an estimated one. The range-based
+        # estimator is a fallback for bar-only environments and is conservative
+        # by construction; using it when a real quote feed exists would refuse
+        # trades on liquid instruments for no reason.
+        ex = ctx.exog
+        spread_rel = (
+            float(ex.spread)
+            if ex.spread is not None and math.isfinite(ex.spread) and ex.spread >= 0.0
+            else self.kernel.micro.out.spread
+        )
         cost = self.costs.estimate(
             f,
-            spread_rel=self.kernel.micro.out.spread,
+            spread_rel=spread_rel,
             participation_fraction=self.cfg.default_participation,
             stress_multiplier=stress_mult,
         )
