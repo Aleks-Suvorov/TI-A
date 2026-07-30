@@ -218,6 +218,16 @@ class Config:
         sensitivity=(0.5, 2.0),
     )
     fusion_bias: float = P(0.0, Provenance.DEV, "intercept of the calibration link")
+    fusion_evidence_sd: float = P(
+        0.6,
+        Provenance.DEV,
+        "standard deviation of a single unit-reliability engine's log-odds "
+        "evidence about the latent direction. Sets how fast pooled uncertainty "
+        "grows with effective breadth, and hence how hard it is for the system "
+        "to report a high confidence. Identified separately from the "
+        "temperature because breadth and evidence magnitude vary independently",
+        sensitivity=(0.5, 2.0),
+    )
     fusion_shrink: float = P(
         0.15,
         Provenance.THEORY,
@@ -227,11 +237,16 @@ class Config:
         sensitivity=(0.4, 3.0),
     )
     ebe_min: float = P(
-        2.5,
+        1.25,
         Provenance.THEORY,
-        "minimum effective breadth of evidence. Below this the apparent "
-        "agreement of many engines is really one piece of information counted "
-        "several times, and the trade is refused however high its probability",
+        "minimum effective breadth of evidence *supporting the proposed "
+        "direction*. Below this, the apparent agreement of many engines is "
+        "really one piece of information counted several times, and the trade "
+        "is refused however high its probability. Calibrated from measurement "
+        "rather than taste: the nine engines have a measured mean absolute "
+        "score correlation near 0.30, giving a total breadth at full "
+        "reliability of about 2.66, so requiring 1.25 demands that roughly half "
+        "of all the independence the system actually possesses point one way",
         sensitivity=(0.7, 1.5),
     )
     correlation_window: int = P(
@@ -313,11 +328,30 @@ class Config:
         sensitivity=(0.5, 2.5),
     )
     cost_slippage_range_frac: float = P(
-        0.10,
+        0.02,
         Provenance.THEORY,
         "fraction of the execution bar's range charged as adverse slippage. A "
-        "deliberately pessimistic fill assumption",
+        "typical bar's range is around 1.3 forecast sigma, so this is roughly "
+        "0.026 sigma per side -- several times what a patient execution on a "
+        "liquid instrument actually pays, and deliberately so",
         sensitivity=(0.5, 3.0),
+    )
+    cost_max_half_spread_sigma: float = P(
+        0.20,
+        Provenance.THEORY,
+        "half-spread, in sigma, above which the instrument is declared too "
+        "illiquid for this system rather than merely expensive. Range-based "
+        "spread estimators cannot resolve spreads far below a bar's volatility, "
+        "so an estimate this large means the cost model has no information, and "
+        "trading on a cost number that carries no information is worse than not "
+        "trading at all",
+        sensitivity=(0.5, 2.0),
+    )
+    default_participation: float = P(
+        0.002,
+        Provenance.OPS,
+        "assumed order size as a fraction of a bar's dollar volume, used to "
+        "price impact when the caller does not supply a size",
     )
     cost_fee_bps: float = P(1.0, Provenance.OPS, "per-side commission in basis points")
     spread_estimator_window: int = P(

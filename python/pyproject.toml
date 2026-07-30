@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tia"
+version = "1.0.0"
+description = "TI-A: an adaptive, abstention-first trading signal framework"
+readme = "../README.md"
+requires-python = ">=3.10"
+# numpy only. Everything in features/, engines/, fusion/, decision/ and risk/
+# runs without an optional dependency, because those modules are what gets
+# ported into a live trading environment.
+dependencies = ["numpy>=1.24"]
+
+[project.optional-dependencies]
+research = ["pandas>=2.0", "scipy>=1.10"]
+crosscheck = ["scikit-learn>=1.3", "statsmodels>=0.14"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+tia = "tia.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::RuntimeWarning"]

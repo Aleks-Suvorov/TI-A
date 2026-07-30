@@ -269,6 +269,7 @@ class FeatureSnapshot:
     vol_rank: float = math.nan
     vol_ratio: float = math.nan  #: sigma_ew / sigma_fcst; >1 means expanding
     compression: float = math.nan  #: how coiled the range is, in [0,1]
+    range_over_sigma: float = math.nan  #: ln(H/L) / sigma_fcst for this bar
 
     # -- displacement and flow -------------------------------------------
     ret: float = math.nan  #: log close-to-close return of this bar
