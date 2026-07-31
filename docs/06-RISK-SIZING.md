@@ -17,26 +17,25 @@ Selectivity is a consequence of this rule, not a threshold anyone chose, and it
 tightens automatically in exactly the circumstances where one should trade less:
 thin data (wide posterior), high outcome variance, or rising costs.
 
-The observed behaviour, from `python3 -m tia.cli demo` (6,000 bars, seed 77,
-measured spread supplied):
+The observed behaviour under the corrected execution model (next-open fills,
+cost-charged equity; 5,000 bars, seed 77, measured spread supplied):
 
-| synthetic edge | net expectancy | t (effective n) | signals |
-|---|---|---|---|
-| 0.06 (realistic) | **+0.47σ** | **+1.80** | **0** |
-| 0.30 | +1.52σ | +6.55 | 62 |
-| 0.80 | +2.03σ | +11.68 | 33 |
+| synthetic edge | trades | net/trade | t (effective n) | equity |
+|---|---|---|---|---|
+| 0.06 (realistic) | **0** | — | — | 1.0000 |
+| 0.30 | 32 | +1.47σ | +4.22 | 1.66 |
+| 0.80 | 19 | +2.30σ | +7.53 | 1.75 |
 
-The first row is the design. Net expectancy is *positive and substantial* and the
-system trades nothing, because 38 candidates carry only 22 independent
-observations, the t-statistic is 1.8, and the lower credible bound is therefore
-still negative. **It is not refusing because the edge is absent.** It is refusing
-because the edge cannot be demonstrated, and the gate acts on what can be
-defended rather than on what is believed.
+The first row is the design. At an edge strength comparable to what is actually
+achievable, the system emits nothing — not because the edge is absent but
+because it cannot be demonstrated, and the gate acts on the lower credible
+bound rather than the point estimate.
 
 The t-statistics are computed against `combined_effective_sample_size`, not the
-candidate count. Using Kish's statistic instead — which is scale-invariant and
-therefore blind to uniform overlap — inflated these by up to 2.6x before it was
-corrected; see `docs/09-ASSUMPTIONS.md` A6.
+candidate count — Kish's statistic alone is scale-invariant and blind to
+uniform overlap; see `docs/09-ASSUMPTIONS.md` A6. Equity is net of the modelled
+round trip charged at booking; see `docs/19-ADVERSARIAL-AUDIT.md` D3 for the
+version of this table that was produced before costs were charged.
 
 These numbers move with the sample. At 5,000 bars rather than 6,000 the same
 seed gives t = 2.50 and 6.61 for the two lower rows. That instability across a

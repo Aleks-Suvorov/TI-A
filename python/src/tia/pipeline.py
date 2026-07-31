@@ -86,6 +86,14 @@ class TradeRecord:
     risk_fraction: float
     equity_after: float
     reason: str = ""
+    #: Modelled round-trip cost at decision time, sigma units. Equity is charged
+    #: this; ret_sigma stays GROSS because the gate nets costs separately and
+    #: the Edge Book must learn the same (gross) quantity it is compared to.
+    cost_sigma: float = 0.0
+
+    @property
+    def net_sigma(self) -> float:
+        return self.ret_sigma - self.cost_sigma
 
 
 class TIA:
@@ -243,6 +251,18 @@ class TIA:
             setup, bucket,
         )
 
+        if action.is_exit and self.policy.last_closed is not None:
+            # A bar-close exit: vertical barrier, confirmed reversal, or session
+            # close. Booked at this bar's close, matching the labeller's
+            # vertical-barrier convention, with outcome 0 (neither barrier).
+            # An earlier version dropped these entirely -- the position left the
+            # state machine but no trade record and no equity change existed,
+            # and in learn mode the Edge Book never saw a timeout outcome,
+            # biasing it toward barrier touches.
+            closed = self.policy.last_closed
+            self.policy.last_closed = None
+            self._book_trade(closed, bar.close, 0, why)
+
         if action.is_entry and risk is not None:
             self._open_risk = risk.risk_fraction
             self._open_entry_price = bar.close
@@ -294,6 +314,22 @@ class TIA:
         op = self.policy.open
         if op is None:
             return
+
+        if not op.filled:
+            # Execution: the decision was made at the previous close; the fill
+            # is THIS bar's open, exactly as execute_at_index has always
+            # claimed and exactly as the triple-barrier labeller that trained
+            # the Edge Book assumes. Barriers keep their sigma distances but
+            # are re-anchored to the real fill, so they always straddle it and
+            # a "gap at fill" is impossible by construction.
+            import dataclasses as _dc
+
+            op.entry_price = bar.open
+            op.spec = _dc.replace(op.spec, entry_ref=bar.open)
+            op.filled = True
+            # Fall through: the fill bar's own range is barrier-checked below,
+            # matching the labeller, which begins checking on the fill bar.
+
         spec = op.spec
         stop_p, tgt_p = spec.stop_price, spec.target_price
         d = spec.direction
@@ -321,12 +357,18 @@ class TIA:
         ret = math.log(exit_price / op.entry_price) * spec.direction
         ret_sigma = ret / spec.sigma if spec.sigma > 0.0 else 0.0
 
+        # Equity is charged the round trip modelled at decision time. An
+        # earlier version charged nothing: the gate netted costs for the
+        # DECISION while the reported P&L was cost-free -- the single easiest
+        # way for a backtest to flatter itself. ret_sigma stays gross because
+        # the Edge Book must learn the same quantity the gate later nets.
+        net_sigma = ret_sigma - op.cost_sigma
         pnl_frac = 0.0
         if spec.stop_sigma > 0.0 and self._open_risk > 0.0:
-            pnl_frac = (ret_sigma / spec.stop_sigma) * self._open_risk
+            pnl_frac = (net_sigma / spec.stop_sigma) * self._open_risk
         self.equity *= 1.0 + pnl_frac
         self.limits.on_equity(self.equity)
-        self.limits.on_trade(ret_sigma)
+        self.limits.on_trade(net_sigma)
 
         if self.learn:
             # Because only one position is open at a time, labels never overlap
@@ -353,6 +395,7 @@ class TIA:
                 risk_fraction=self._open_risk,
                 equity_after=self.equity,
                 reason=reason,
+                cost_sigma=op.cost_sigma,
             )
         )
         self._open_risk = 0.0

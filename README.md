@@ -167,6 +167,7 @@ docs/
   11-PINE-PLAN.md          the port: what maps, what is approximated, tolerances
   12..16                   deployment, monitoring, learning, complexity, roadmap
   17-EVIDENCE-REVIEW.md    every concept graded A-F, kept or discarded, with reasons
+  19-ADVERSARIAL-AUDIT.md  the red-team audit: five critical bugs, fixes, verdict
   18-LITERATURE.md         annotated bibliography
 python/src/tia/            the implementation (numpy only in the live path)
 python/tests/              90 tests; test_causality.py is the leakage auditor

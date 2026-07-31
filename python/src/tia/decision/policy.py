@@ -75,6 +75,12 @@ class OpenPosition:
     bucket: int
     p_at_entry: float
     bars_held: int = 0
+    #: The round-trip cost modelled at decision time, in sigma units. Charged to
+    #: equity when the trade is booked, so realized P&L is net of frictions.
+    cost_sigma: float = 0.0
+    #: False until the executor fills the entry at the next bar's open. Barriers
+    #: in ``spec`` are re-anchored to the actual fill at that moment.
+    filled: bool = False
 
 
 def classify_setup(
@@ -92,9 +98,14 @@ def classify_setup(
     """
     liq = outputs.get("liquidity")
     if liq is not None and liq.valid:
-        if float(liq.diagnostics.get("sweep_age", 999)) <= 4 and abs(
-            float(liq.diagnostics.get("sweep_score", 0.0))
-        ) > 0.05:
+        # The liquidity engine reports sweep_age in .features when a sweep is
+        # active (it is human-facing then) and in .diagnostics when idle. An
+        # earlier version read only .diagnostics, which made SWEEP_REVERSAL
+        # unreachable: across 20,000 audited bars with 2,193 active-sweep bars,
+        # zero were classified into the family, so a quarter of the Edge Book's
+        # taxonomy silently never existed. Read both, features first.
+        age = float(liq.features.get("sweep_age", liq.diagnostics.get("sweep_age", 999)))
+        if age <= 4 and abs(float(liq.diagnostics.get("sweep_score", 0.0))) > 0.05:
             return SetupFamily.SWEEP_REVERSAL
 
     vol = outputs.get("volatility")
@@ -123,6 +134,12 @@ class Policy:
         self._last_exit_index = -(10**9)
         self.n_entries = 0
         self.n_exits = 0
+        #: The position most recently closed by a bar-close decision (vertical
+        #: barrier, reversal, session close). The executor reads and books it.
+        #: An earlier version discarded it here, so those exits produced no
+        #: trade record and no equity change -- 4 of 62 positions in the audit
+        #: run simply vanished from the accounting.
+        self.last_closed: OpenPosition | None = None
 
     def reset(self) -> None:
         self.position = Position.FLAT
@@ -132,6 +149,7 @@ class Policy:
         self._last_exit_index = -(10**9)
         self.n_entries = 0
         self.n_exits = 0
+        self.last_closed = None
 
     # ------------------------------------------------------------------ #
     @property
@@ -265,6 +283,7 @@ class Policy:
         exit_sig = self.check_exit(ctx, fusion)
         if exit_sig is not None:
             action, why = exit_sig
+            self.last_closed = self.open
             self._close(self._index)
             g = GateResult(passed=False, ev_mean=edge.mean, ev_lcb=edge.lcb, reasons=[why])
             return action, g, why
@@ -277,6 +296,13 @@ class Policy:
 
         action = Action.BUY if fusion.direction > 0 else Action.SHORT
         self.position = Position.LONG if fusion.direction > 0 else Position.SHORT
+        # entry_price here is PROVISIONAL (the decision close). The executor
+        # fills at the next bar's open and re-anchors the barriers to the fill
+        # -- which is what SPEC.md section 2 rule 3 requires, what
+        # execute_at_index has always claimed, and what the triple-barrier
+        # labeller the Edge Book is trained on actually does. An earlier
+        # version filled at this close, so the live system was trading a
+        # different game from the one it had learned.
         self.open = OpenPosition(
             direction=fusion.direction,
             entry_index=self._index,
@@ -286,6 +312,8 @@ class Policy:
             regime=int(regime),
             bucket=bucket,
             p_at_entry=fusion.p_success,
+            cost_sigma=costs.round_trip_sigma if math.isfinite(costs.round_trip_sigma) else 0.0,
+            filled=False,
         )
         self._recent_entries.append(self._index)
         self.n_entries += 1

@@ -344,3 +344,164 @@ def test_training_attributes_outcomes_to_the_right_cells_after_a_drop() -> None:
     root = book._root
     assert root.n_w > 0.0
     assert root.n_w <= diag["n_labelled"] + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# 8. The execution model (adversarial audit findings)
+# ---------------------------------------------------------------------------
+
+
+def _trained_system():
+    from tia.synthetic import generate_with_regimes
+    from tia.training import collect_candidates, train_edge_book
+    from tia.types import ExogenousSnapshot
+
+    bars, _ = generate_with_regimes(6000, seed=61, trend_strength=0.5, revert_strength=0.75)
+    exog = [ExogenousSnapshot(spread=5e-4)] * len(bars)
+    cands = collect_candidates(bars, Config(), exog=exog)
+    book, cal, _ = train_edge_book(bars, cands, Config())
+    sysm = TIA(Config(), edge_book=book, learn=False)
+    sysm.calibrator._iso = cal
+    sysm.calibrator.active = cal.n_fit > 0
+    return sysm, bars, exog
+
+
+def test_every_entry_produces_exactly_one_trade_record() -> None:
+    """The bug: vertical-barrier, reversal and session-close exits removed the
+    position from the state machine but were never booked -- no trade record,
+    no equity change. 4 of 62 positions in the audit run simply vanished, and
+    in learn mode the Edge Book never saw a timeout outcome."""
+    sysm, bars, exog = _trained_system()
+    entries = sum(1 for d in sysm.stream(bars) if d.action.is_entry)
+    still_open = 1 if sysm.policy.open else 0
+    assert entries == len(sysm.trades) + still_open, (
+        f"{entries} entries but {len(sysm.trades)} trades booked "
+        f"({still_open} open): positions are vanishing from the accounting"
+    )
+    reasons = {t.reason.split(" ")[0] for t in sysm.trades}
+    # Timeout-class exits must appear in the record, not only barrier fills.
+    assert reasons - {"target", "stop"}, (
+        f"only barrier exits were booked ({reasons}); bar-close exits are lost"
+    )
+
+
+def test_entries_fill_at_the_next_bars_open() -> None:
+    """The bug: the live pipeline filled at the decision bar's CLOSE while the
+    triple-barrier labeller that trains the Edge Book fills at the next bar's
+    OPEN (execution_lag=1). The system was trading a different game from the
+    one it had learned, and SPEC.md section 2 rule 3 -- which the Decision's
+    own execute_at_index field states -- was violated by the backtest itself."""
+    sysm, bars, exog = _trained_system()
+    sysm.run(bars, exog=exog)
+    assert sysm.trades, "fixture produced no trades"
+    for t in sysm.trades:
+        want = bars[t.entry_index + 1].open
+        assert t.entry_price == pytest.approx(want, rel=1e-12), (
+            f"trade at {t.entry_index} filled at {t.entry_price}, "
+            f"next open is {want}"
+        )
+
+
+def test_equity_is_charged_the_modelled_round_trip() -> None:
+    """The bug: the gate netted costs for the decision while realized P&L was
+    cost-free -- the single easiest way for a backtest to flatter itself."""
+    sysm, bars, exog = _trained_system()
+    sysm.run(bars, exog=exog)
+    assert sysm.trades
+    total_cost = sum(t.cost_sigma for t in sysm.trades)
+    assert total_cost > 0.0, "no cost was charged to any trade"
+    for t in sysm.trades:
+        assert t.net_sigma == pytest.approx(t.ret_sigma - t.cost_sigma)
+    gross = sum(t.ret_sigma for t in sysm.trades)
+    net = sum(t.net_sigma for t in sysm.trades)
+    assert net < gross, "net must be strictly below gross when costs are positive"
+
+
+def test_timeout_outcomes_reach_the_edge_book_in_learn_mode() -> None:
+    """Learning from barrier touches only biases the book optimistic: timeouts
+    are the mediocre outcomes, and a learner that never sees them concludes the
+    world is made of wins and losses at full barrier distance."""
+    from tia.synthetic import generate_with_regimes
+    from tia.training import collect_candidates, train_edge_book
+    from tia.types import ExogenousSnapshot
+
+    bars, _ = generate_with_regimes(6000, seed=61, trend_strength=0.5, revert_strength=0.75)
+    exog = [ExogenousSnapshot(spread=5e-4)] * len(bars)
+    cands = collect_candidates(bars, Config(), exog=exog)
+    book, cal, _ = train_edge_book(bars, cands, Config())
+
+    # Count observe() calls directly: comparing n_w before/after is confounded
+    # by the book's own exponential decay over the replay.
+    observed: list[float] = []
+    original = book.observe
+
+    def counting_observe(regime, setup, bucket, ret_sigma, weight=1.0):
+        observed.append(float(ret_sigma))
+        return original(regime, setup, bucket, ret_sigma, weight)
+
+    book.observe = counting_observe  # type: ignore[method-assign]
+    sysm = TIA(Config(), edge_book=book, learn=True)
+    sysm.calibrator._iso = cal
+    sysm.calibrator.active = cal.n_fit > 0
+    sysm.run(bars, exog=exog)
+
+    timeouts = [t for t in sysm.trades if t.outcome == 0]
+    if not timeouts:
+        pytest.skip("no timeout exits on this sample")
+    assert len(observed) == len(sysm.trades), (
+        f"{len(sysm.trades)} trades closed but only {len(observed)} reached the "
+        "Edge Book: timeout outcomes are being dropped from learning"
+    )
+
+
+def test_sweep_reversal_family_is_reachable() -> None:
+    """The bug: classify_setup read sweep_age from .diagnostics, but the
+    liquidity engine reports it in .features when a sweep is active. Across
+    20,000 audited bars with 2,193 active-sweep bars, zero were classified
+    SWEEP_REVERSAL -- a quarter of the Edge Book's taxonomy did not exist."""
+    from collections import Counter
+
+    from tia.decision.policy import classify_setup
+    from tia.engines.edgebook import SetupFamily
+    from tia.synthetic import generate_with_regimes
+
+    counts: Counter = Counter()
+    for seed in (5, 21, 44):
+        bars, _ = generate_with_regimes(4000, seed=seed, trend_strength=0.3, revert_strength=0.5)
+        sysm = TIA(Config())
+        for d in sysm.stream(bars):
+            if d.engine_outputs:
+                counts[classify_setup(d.engine_outputs, d.regime, d.regime_posterior)] += 1
+    assert counts.get(SetupFamily.SWEEP_REVERSAL, 0) > 0, (
+        f"SWEEP_REVERSAL never classified: {dict(counts)}"
+    )
+
+
+def test_pine_lognorm_sign_matches_the_reference() -> None:
+    """The export ships ln B(a,b) -- the value beta_logpdf SUBTRACTS. The
+    audit's own first fix ADDED it, inverting the correction and doubling the
+    damage. This locks the sign against the Python reference at sample points."""
+    import json
+    import re
+
+    from tia.engines.regime import beta_logpdf
+
+    model_path = REPO / "pine" / "frozen_model.json"
+    if not model_path.exists():
+        pytest.skip("no exported model")
+    m = json.loads(model_path.read_text())
+    a = m["regime"]["design_a"]; b = m["regime"]["design_b"]
+    n = m["regime"]["design_log_beta_norm"]
+    fa = [v for r in a for v in r] if isinstance(a[0], list) else a
+    fb = [v for r in b for v in r] if isinstance(b[0], list) else b
+    fn = [v for r in n for v in r] if isinstance(n[0], list) else n
+    for ai, bi, ni in zip(fa, fb, fn):
+        for x in (0.1, 0.5, 0.9):
+            pine = (ai - 1) * math.log(x) + (bi - 1) * math.log(1 - x) - ni
+            assert pine == pytest.approx(beta_logpdf(x, ai, bi), abs=1e-9)
+    # And the .pine source must subtract, not add.
+    for name in ("TIA.pine", "TIA_strategy.pine"):
+        text = (REPO / "pine" / name).read_text()
+        assert re.search(r"f_betaLogPdf\([^)]*\)[^\n]*-\s*array\.get\(DESIGN_LOGN", text), (
+            f"{name}: the lognorm correction is not being subtracted"
+        )
