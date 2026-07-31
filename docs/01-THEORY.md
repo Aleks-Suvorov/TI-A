@@ -759,20 +759,21 @@ little to overfit *with*, and that the count is auditable.
 | Provenance | Count | Charged to DSR? |
 |---|---|---|
 | `THEORY` — set a priori, never tuned on outcomes | ~45 | No |
-| `DEV` — fit once on the development universe, then frozen | **6** | **Yes** |
+| `DEV` — fit once on the development universe, then frozen | **7** | **Yes** |
 | `ONLINE` — updated by causal recursion during operation | ~5 | No (adds variance, not optimism) |
 | `OPS` — account size, risk appetite, symbol list | ~10 | No |
 
-The six fitted parameters are: two Kalman signal-to-noise ratios, regime
-stickiness, the calibration temperature and bias, and the impact coefficient.
+The seven fitted parameters are: two Kalman signal-to-noise ratios, regime
+stickiness, the calibration temperature, bias and evidence standard deviation,
+and the impact coefficient.
 Everything else that *looks* like a tuning knob — window lengths, barrier
 multiples, regime design table, pooling strengths — is fixed by dimensional
 argument or by published convention, and `config.py` records which is which and
 hashes the manifest so that a report and a running system can be proven to
 match.
 
-A system with ten engines and six fitted parameters is a fundamentally different
-statistical object from one with ten engines and sixty.
+A system with ten engines and seven fitted parameters is a fundamentally
+different statistical object from one with ten engines and sixty.
 
 ---
 

@@ -22,7 +22,7 @@ one percent. Three consequences drive the entire design:
 
 1. **Any method with enough capacity to fit R² = 0.3% can fit noise.** So
    capacity is spent deliberately and *counted*: `Config.fitted_dof()` reports
-   the number of parameters ever fitted to market outcomes, and it is **6**.
+   the number of parameters ever fitted to market outcomes, and it is **7**.
    Everything else is fixed a priori, updated by causal recursion, or an
    operational knob.
 

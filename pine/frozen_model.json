@@ -1,6 +1,6 @@
 {
   "schema_version": "2.0.0",
-  "generated_at": "2026-07-31T02:39:28+00:00",
+  "generated_at": "2026-07-31T03:13:55+00:00",
   "generator": "tia.export.export_frozen_model",
   "tia_version": "1.0.0",
   "config_manifest_hash": "20499f7708b16f27",
@@ -557,14 +557,14 @@
       1.0
     ],
     "knots_y": [
-      0.0,
-      0.0,
+      0.2,
+      0.2,
       0.495002337865,
       0.50481601461,
       0.528509942467,
       0.61963373748,
-      1.0,
-      1.0
+      0.75,
+      0.75
     ],
     "n_knots": 8,
     "min_samples": 200,

@@ -63,6 +63,7 @@ import datetime as _dt
 import json
 import math
 import re
+import pathlib
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -836,7 +837,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - CLI
     import argparse
 
     ap = argparse.ArgumentParser(description="Freeze a trained TI-A for the Pine port.")
-    ap.add_argument("--out", default="pine/frozen_model.json")
+    # Repo-relative, not cwd-relative: running `python -m tia.export` from
+    # python/ previously wrote a stray python/pine/ tree.
+    _repo = pathlib.Path(__file__).resolve().parents[3]
+    ap.add_argument("--out", default=str(_repo / "pine" / "frozen_model.json"))
     ap.add_argument("--emit", nargs="*", default=[], help=".pine files whose frozen region to rewrite")
     ap.add_argument("--instruments", type=int, default=6)
     ap.add_argument("--bars", type=int, default=9000)
