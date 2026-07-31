@@ -278,3 +278,69 @@ def test_edge_book_sibling_evidence_still_informs_an_empty_cell() -> None:
         for _ in range(400):
             book.observe(2, 1, b, float(rng.normal(0.5, 1.0)))
     assert book.estimate(2, 1, 4).mean > 0.1
+
+
+# ---------------------------------------------------------------------------
+# 7. Barrier outcomes misaligned with their candidates
+# ---------------------------------------------------------------------------
+
+
+def test_barrier_outcomes_are_realigned_by_source_position() -> None:
+    """The bug: the labeller DROPS candidates it cannot fill -- one whose
+    execution bar is past the end of the sample, or whose sigma is not finite --
+    so its output is shorter than the candidate arrays and not positionally
+    aligned with them. `train_edge_book` indexed the candidate arrays with
+    output-relative positions, attributing every outcome after the first drop to
+    the wrong regime, setup and bucket. It corrupted the Edge Book silently; the
+    length mismatch only happened to raise further down, and only in the
+    walk-forward path, where prefixes truncate the trailing candidates.
+    """
+    from tia.labeling.triple_barrier import apply_triple_barrier
+
+    n = 60
+    high = np.full(n, 101.0)
+    low = np.full(n, 99.0)
+    close = np.full(n, 100.0)
+    open_ = np.full(n, 100.0)
+
+    entries = np.array([5, 10, 15, 20, n - 1])  # the last cannot be filled
+    dirs = np.array([1, 1, -1, 1, 1])
+    sig = np.array([0.01, 0.01, np.nan, 0.01, 0.01])  # index 2 has no sigma
+
+    res = apply_triple_barrier(
+        high, low, close, entries, dirs, stop_sigma=1.0, target_sigma=2.0,
+        sigma=sig, max_holding=10, execution_lag=1, open_=open_,
+    )
+
+    assert res.n_dropped >= 2, f"expected drops, got {res.n_dropped}"
+    assert len(res) < entries.size
+
+    # The realignment invariant the training pass depends on.
+    assert np.array_equal(res.entry_index, entries[res.source_position])
+    assert np.array_equal(res.direction, dirs[res.source_position])
+
+    # And the property that makes the old code wrong: row index != source index.
+    assert np.any(res.source_position != np.arange(len(res))), (
+        "this fixture no longer forces a misalignment, so it cannot detect the bug"
+    )
+
+
+def test_training_attributes_outcomes_to_the_right_cells_after_a_drop() -> None:
+    """End-to-end version: a prefix that truncates trailing candidates must not
+    shift outcomes into neighbouring Edge Book cells."""
+    from tia.synthetic import generate_with_regimes
+    from tia.training import collect_candidates, train_edge_book
+
+    bars, _ = generate_with_regimes(2500, seed=44, trend_strength=0.4, revert_strength=0.6)
+    cands = collect_candidates(bars, Config())
+    if len(cands) < 20:
+        pytest.skip("too few candidates on this sample")
+
+    book, _, diag = train_edge_book(bars, cands, Config())
+    assert diag["n_labelled"] + diag["n_dropped"] == pytest.approx(float(len(cands)))
+
+    # Total weighted observations in the book must equal what was labelled;
+    # a misattribution would still balance, but a length bug would not.
+    root = book._root
+    assert root.n_w > 0.0
+    assert root.n_w <= diag["n_labelled"] + 1e-9

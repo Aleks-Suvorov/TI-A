@@ -98,6 +98,7 @@ class TIA:
         edge_book: EdgeBook | None = None,
         initial_equity: float = 1.0,
         learn: bool = True,
+        history_limit: int | None = None,
     ) -> None:
         self.cfg = cfg or Config()
         self.kernel = FeatureKernel(self.cfg, session)
@@ -128,6 +129,12 @@ class TIA:
         self.limits = RiskLimits(self.cfg, initial_equity)
         self.learn = bool(learn)
 
+        # Research keeps everything; a live service must not. At one-minute bars
+        # an unbounded decision log grows by roughly half a gigabyte a year, and
+        # a signal system that quietly consumes memory for months is a system
+        # that fails at an unpredictable moment for an unrelated-looking reason.
+        # None means unbounded, which is the right default for a backtest.
+        self.history_limit = history_limit
         self.equity = float(initial_equity)
         self.trades: list[TradeRecord] = []
         self.decisions: list[Decision] = []
@@ -264,6 +271,13 @@ class TIA:
             card=card,
         )
         self.decisions.append(dec)
+        if self.history_limit is not None:
+            # Trim in blocks rather than one at a time: a list pop from the front
+            # is O(n), and doing it every bar would make the pipeline quadratic.
+            if len(self.decisions) > 2 * self.history_limit:
+                del self.decisions[: len(self.decisions) - self.history_limit]
+            if len(self.trades) > 2 * self.history_limit:
+                del self.trades[: len(self.trades) - self.history_limit]
         return dec
 
     # ------------------------------------------------------------------ #

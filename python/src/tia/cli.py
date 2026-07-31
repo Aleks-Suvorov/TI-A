@@ -177,6 +177,7 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     print(f"  {'edge':>6s} {'cands':>6s} {'gross':>8s} {'cost':>7s} {'net':>8s} "
           f"{'t':>7s} {'signals':>8s}")
     s2 = None
+    rows: list[dict[str, float]] = []
     for strength in (0.06, 0.30, 0.80):
         bb, _ = generate_with_regimes(
             args.bars * 2, seed=77, trend_strength=strength, revert_strength=strength * 1.5
@@ -193,16 +194,32 @@ def _cmd_demo(args: argparse.Namespace) -> int:
               f"{dd.get('mean_cost_sigma', math.nan):7.3f} "
               f"{dd.get('net_expectancy_sigma', math.nan):+8.4f} "
               f"{dd.get('t_stat_effective', math.nan):+7.2f} {acted:8d}")
+        rows.append({
+            "gross": float(dd.get("mean_ret_sigma", math.nan)),
+            "cost": float(dd.get("mean_cost_sigma", math.nan)),
+            "net": float(dd.get("net_expectancy_sigma", math.nan)),
+            "t": float(dd.get("t_stat_effective", math.nan)),
+            "ess": float(dd.get("effective_sample_size", math.nan)),
+        })
         if acted:
             s2 = ss
     print()
+    # Describe the row that was actually printed rather than asserting numbers.
+    # They move with the sample -- which is itself the point, and a narrative
+    # that contradicts its own table teaches the reader to stop reading it.
+    r0 = rows[0]
     print("Read the first row carefully. At an edge strength comparable to what is")
-    print("actually achievable, net expectancy is positive but the t-statistic is")
-    print("around 1 -- and the system emits nothing. It is not refusing because the")
-    print("edge is absent; it is refusing because the edge cannot be demonstrated,")
-    print("and the gate acts on the LOWER credible bound rather than the estimate.")
-    print("That is the design working, and it is why extreme selectivity falls out")
-    print("of the decision rule instead of being imposed by a threshold.")
+    print(f"actually achievable, gross expectancy is {r0['gross']:+.3f} sigma against")
+    print(f"{r0['cost']:.3f} of cost; the t-statistic on {r0['ess']:.0f} independent")
+    print(f"observations is {r0['t']:+.2f}, and the system emits nothing.")
+    print()
+    print("Whether net expectancy on that row is positive or negative varies with")
+    print("the sample. What does not vary is the reason for standing aside: at a")
+    print("t-statistic near 1 the LOWER credible bound is negative, and the gate")
+    print("acts on that rather than on the point estimate. The system is not")
+    print("refusing because the edge is absent -- it is refusing because the edge")
+    print("cannot be demonstrated. Extreme selectivity falls out of the decision")
+    print("rule instead of being imposed by a threshold.")
 
     if s2 is None:
         s2 = s1

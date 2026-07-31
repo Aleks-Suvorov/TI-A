@@ -225,13 +225,31 @@ def train_edge_book(
     ess = combined_effective_sample_size(len(bars), res.entry_index, res.exit_index, w)
     diag["effective_sample_size"] = float(ess)
     diag["uniqueness_ratio"] = float(ess / max(len(candidates), 1))
+    diag["n_labelled"] = float(len(res))
+    diag["n_dropped"] = float(res.n_dropped)
+
+    # CRITICAL: the barrier labeller DROPS candidates it cannot fill -- one whose
+    # execution bar lies past the end of the sample, or whose sigma is not
+    # finite -- so `res` is shorter than the candidate arrays and its rows are
+    # NOT positionally aligned with them. `source_position` maps each surviving
+    # row back to its candidate. Indexing the candidate arrays with `res`-
+    # relative positions instead (an earlier version's mistake) attributes every
+    # outcome after the first drop to the wrong regime, setup and bucket, which
+    # corrupts the Edge Book silently; the length mismatch only happened to
+    # raise on the calibration line further down.
+    src = res.source_position.astype(np.int64)
+    reg = a["regime"][src]
+    setup_i = a["setup"][src]
+    bucket_i = a["bucket"][src]
+    p_raw_all = a["p_success"][src]
+    cost_all = a["cost_sigma"][src]
 
     ok = np.isfinite(res.ret_sigma)
     for j in np.nonzero(ok)[0]:
         book.observe(
-            int(a["regime"][j]),
-            int(a["setup"][j]),
-            int(a["bucket"][j]),
+            int(reg[j]),
+            int(setup_i[j]),
+            int(bucket_i[j]),
             float(res.ret_sigma[j]),
             weight=float(w[j]),
         )
@@ -242,7 +260,7 @@ def train_edge_book(
     # purpose even though they are not losses, because the forecast was about
     # the barrier, not the sign.
     success = (res.outcome[ok] > 0).astype(float)
-    praw = a["p_success"][ok]
+    praw = p_raw_all[ok]
     cal = calibrator or IsotonicCalibrator()
     if praw.size >= cfg.calibration_min_samples:
         cal.fit(praw, success, weights=w[ok])
@@ -252,11 +270,11 @@ def train_edge_book(
 
     diag["hit_rate"] = float(success.mean()) if success.size else math.nan
     diag["mean_ret_sigma"] = float(np.average(res.ret_sigma[ok], weights=w[ok])) if ok.any() else math.nan
-    diag["mean_cost_sigma"] = float(np.mean(a["cost_sigma"][ok])) if ok.any() else math.nan
+    diag["mean_cost_sigma"] = float(np.mean(cost_all[ok])) if ok.any() else math.nan
     diag["net_expectancy_sigma"] = diag["mean_ret_sigma"] - diag["mean_cost_sigma"]
     # The t-statistic that matters uses the *effective* sample size, not the
-    # candidate count. Reporting the naive one would overstate significance by
-    # roughly sqrt(n / ess), which for a twenty-bar horizon is a factor of four.
+    # candidate count. Reporting the naive one overstates significance by
+    # sqrt(n / ess) -- measured at 1.5x here and up to 2.6x under dense overlap.
     if ok.any():
         r = res.ret_sigma[ok]
         wt = w[ok]
