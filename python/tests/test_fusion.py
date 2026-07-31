@@ -264,3 +264,34 @@ def test_online_calibrator_stays_identity_until_it_has_data() -> None:
     for _ in range(199):
         c.record(float(rng.random()), bool(rng.random() < 0.5))
     assert c(0.73) == 0.73, "must not calibrate on fewer than min_samples outcomes"
+
+
+def test_isotonic_never_asserts_certainty() -> None:
+    """A calibrated probability of exactly 0 or 1 is never justified.
+
+    Raw PAVA on binary outcomes drives its end blocks to 0 and 1, because the
+    few observations at the extremes all fell the same way. Smoothing each
+    block by its own size prevents a handful of trades from asserting
+    certainty -- which would propagate straight into position sizing.
+    """
+    rng = np.random.default_rng(11)
+    p = rng.uniform(0.05, 0.99, 500)
+    y = (rng.random(500) < p).astype(float)
+    cal = IsotonicCalibrator().fit(p, y)
+    assert cal.y.min() > 0.0, "isotonic map asserts impossibility"
+    assert cal.y.max() < 1.0, "isotonic map asserts certainty"
+    for x in (0.0, 0.001, 0.5, 0.999, 1.0):
+        v = cal(x)
+        assert 0.0 < v < 1.0, f"calibrated p({x}) = {v} is degenerate"
+
+
+def test_isotonic_smoothing_shrinks_small_blocks_more() -> None:
+    """The correction must be negligible where data is plentiful."""
+    rng = np.random.default_rng(12)
+    n = 20000
+    p = rng.uniform(0.2, 0.8, n)
+    y = (rng.random(n) < p).astype(float)
+    cal = IsotonicCalibrator().fit(p, y)
+    # With this much data in the middle of the range, the map should still track
+    # the identity closely despite the smoothing.
+    assert abs(cal(0.5) - 0.5) < 0.05

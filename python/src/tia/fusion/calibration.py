@@ -51,16 +51,21 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
-def pav(y: np.ndarray, w: np.ndarray | None = None) -> np.ndarray:
+def pav(
+    y: np.ndarray, w: np.ndarray | None = None, return_blocks: bool = False
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Pool-adjacent-violators: the isotonic (non-decreasing) least-squares fit.
 
     O(n) with the standard block-merging implementation. Returns fitted values
     aligned with the input order, which must already be sorted by the predictor.
+    With ``return_blocks``, also returns the number of observations backing each
+    fitted value -- which :class:`IsotonicCalibrator` needs in order to smooth
+    blocks that rest on very few points.
     """
     y = np.asarray(y, dtype=np.float64)
     n = y.size
     if n == 0:
-        return y.copy()
+        return (y.copy(), np.zeros(0)) if return_blocks else y.copy()
     w = np.ones(n) if w is None else np.asarray(w, dtype=np.float64).copy()
 
     vals = y.copy()
@@ -77,11 +82,13 @@ def pav(y: np.ndarray, w: np.ndarray | None = None) -> np.ndarray:
             sizes[k - 1] += sizes[k]
             k -= 1
     out = np.empty(n)
+    counts = np.empty(n)
     pos = 0
     for j in range(k + 1):
         out[pos : pos + sizes[j]] = vals[j]
+        counts[pos : pos + sizes[j]] = sizes[j]
         pos += sizes[j]
-    return out
+    return (out, counts) if return_blocks else out
 
 
 @dataclass
@@ -105,7 +112,29 @@ class IsotonicCalibrator:
             return self
         order = np.argsort(p, kind="stable")
         ps, os_, ws = p[order], o[order], w[order]
-        fitted = pav(os_, ws)
+        fitted = pav(os_, ws)  # type: ignore[assignment]
+
+        # Bound the map's *endpoints* away from certainty. On binary outcomes
+        # PAVA leaves the leading run of failures at exactly 0 and the trailing
+        # run of successes at exactly 1 -- it only pools where the ordering is
+        # violated, and a run of identical values never violates it. So the map
+        # ends up asserting p = 0 and p = 1, which is a claim of certainty, and
+        # it propagates straight into position sizing.
+        #
+        # The evidence behind each endpoint is the length of that run, and the
+        # honest bound is its Laplace posterior mean: n successes out of n
+        # supports (n+1)/(n+2), which is 0.857 on five observations and 0.99 on
+        # a hundred. Clipping preserves monotonicity for free and leaves the
+        # interior untouched -- isotonic's ordering constraint already handles
+        # ordinary small-sample noise there, and flattening the interior would
+        # destroy resolution, which is the property that actually earns anything.
+        if fitted[0] <= 1e-12:
+            n_lo = int(np.argmax(fitted > 1e-12)) or fitted.size
+            fitted = np.maximum(fitted, 1.0 / (n_lo + 2.0))
+        if fitted[-1] >= 1.0 - 1e-12:
+            rev = fitted[::-1]
+            n_hi = int(np.argmax(rev < 1.0 - 1e-12)) or fitted.size
+            fitted = np.minimum(fitted, (n_hi + 1.0) / (n_hi + 2.0))
         # Collapse to the distinct knots of the step function; this is what
         # makes the map small enough to export to Pine Script.
         keep = np.concatenate(([True], np.diff(fitted) > 1e-12))
