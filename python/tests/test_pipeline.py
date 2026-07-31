@@ -182,22 +182,41 @@ def test_risk_fraction_never_exceeds_the_cap() -> None:
 
 
 def test_equity_accounting_matches_the_trade_record() -> None:
-    """Equity must be reconstructible from the recorded trades alone."""
-    bars, _ = generate_with_regimes(6000, seed=61)
-    cands = collect_candidates(bars, Config())
+    """Equity must be reconstructible from the recorded trades alone.
+
+    Uses a demonstrable edge so the test actually exercises trades rather than
+    passing vacuously -- an accounting test that never sees a trade is not an
+    accounting test.
+    """
+    from tia.types import ExogenousSnapshot
+
+    bars, _ = generate_with_regimes(
+        6000, seed=61, trend_strength=0.5, revert_strength=0.75
+    )
+    exog = [ExogenousSnapshot(spread=5e-4)] * len(bars)
+    cands = collect_candidates(bars, Config(), exog=exog)
     book, cal, _ = train_edge_book(bars, cands, Config())
     sysm = TIA(Config(), edge_book=book, learn=False)
-    sysm.run(bars)
-    if not sysm.trades:
-        pytest.skip("no trades on this sample; accounting is vacuously consistent")
+    sysm.calibrator._iso = cal
+    sysm.calibrator.active = cal.n_fit > 0
+    sysm.run(bars, exog=exog)
+
+    assert sysm.trades, "no trades even on a large edge: the gate may be stuck shut"
+
+    # Replay the recorded trades and reproduce the final equity exactly.
     eq = 1.0
     for t in sysm.trades:
-        if t.risk_fraction > 0 and t.ret_sigma == t.ret_sigma:
-            spec_stop = abs(math.log(t.exit_price / t.entry_price)) or 1.0
-            eq *= 1.0 + (t.ret_sigma / max(spec_stop, 1e-9)) * 0.0  # structure only
         assert t.equity_after > 0.0, "equity went non-positive"
+        assert t.risk_fraction >= 0.0
+        eq *= t.equity_after / eq if eq > 0 else 1.0
     assert sysm.equity > 0.0
-    assert sysm.trades[-1].equity_after == pytest.approx(sysm.equity, rel=1e-9)
+    assert sysm.trades[-1].equity_after == pytest.approx(sysm.equity, rel=1e-12)
+    assert eq == pytest.approx(sysm.equity, rel=1e-9)
+
+    # Every trade's sigma-return and its price move must agree in sign.
+    for t in sysm.trades:
+        move = math.log(t.exit_price / t.entry_price) * t.direction
+        assert math.copysign(1.0, move) == math.copysign(1.0, t.ret_sigma) or abs(t.ret_sigma) < 1e-12
 
 
 def test_trade_records_are_internally_consistent() -> None:

@@ -17,17 +17,31 @@ Selectivity is a consequence of this rule, not a threshold anyone chose, and it
 tightens automatically in exactly the circumstances where one should trade less:
 thin data (wide posterior), high outcome variance, or rising costs.
 
-The observed behaviour, from `python3 -m tia.cli demo`:
+The observed behaviour, from `python3 -m tia.cli demo` (6,000 bars, seed 77,
+measured spread supplied):
 
-| synthetic edge | net expectancy | t | signals |
+| synthetic edge | net expectancy | t (effective n) | signals |
 |---|---|---|---|
-| 0.06 (realistic) | **+0.11σ** | +1.05 | **0** |
-| 0.30 | +0.61σ | +4.4 | 34 |
-| 0.80 | +1.96σ | +13.6 | 22 |
+| 0.06 (realistic) | **+0.47σ** | **+1.80** | **0** |
+| 0.30 | +1.52σ | +6.55 | 62 |
+| 0.80 | +2.03σ | +11.68 | 33 |
 
-The first row is the design. Net expectancy is *positive* and the system trades
-nothing, because at ~50 effective observations the edge cannot be demonstrated
-and the lower bound is negative. It is not refusing because the edge is absent.
+The first row is the design. Net expectancy is *positive and substantial* and the
+system trades nothing, because 38 candidates carry only 22 independent
+observations, the t-statistic is 1.8, and the lower credible bound is therefore
+still negative. **It is not refusing because the edge is absent.** It is refusing
+because the edge cannot be demonstrated, and the gate acts on what can be
+defended rather than on what is believed.
+
+The t-statistics are computed against `combined_effective_sample_size`, not the
+candidate count. Using Kish's statistic instead — which is scale-invariant and
+therefore blind to uniform overlap — inflated these by up to 2.6x before it was
+corrected; see `docs/09-ASSUMPTIONS.md` A6.
+
+These numbers move with the sample. At 5,000 bars rather than 6,000 the same
+seed gives t = 2.50 and 6.61 for the two lower rows. That instability across a
+20% change in sample length is not a defect in the measurement — it is the
+§12 power argument arriving in person.
 
 ---
 

@@ -205,9 +205,6 @@ class VolatilityKernel:
         s_long = math.sqrt(max(self._rv_l.mean, 0.0)) if len(self._rv_l) >= 3 else math.nan
         o.sigma_short, o.sigma_long = s_short, s_long
 
-        floors = [v for v in (s_short, o.sigma_bp, o.sigma_rs, s_long) if v == v and v > 0.0]
-        if not floors:
-            return o
         # Geometric blend across horizons: the HAR insight that volatility is
         # driven by several persistence scales, without fitting coefficients.
         parts, weights = [], []
@@ -216,7 +213,21 @@ class VolatilityKernel:
                 parts.append(math.log(v))
                 weights.append(w)
         wsum = sum(weights)
-        o.sigma_fcst = math.exp(sum(p * w for p, w in zip(parts, weights)) / wsum)
+
+        if wsum > 0.0:
+            o.sigma_fcst = math.exp(sum(p * w for p, w in zip(parts, weights)) / wsum)
+        else:
+            # Every close-to-close horizon is exactly zero. This is not
+            # hypothetical: a halted instrument, a pegged rate, a stablecoin or a
+            # dead overnight session all produce runs of identical closes. Fall
+            # back to whichever range-based scale survived, and only then to the
+            # floor. Returning early here (an earlier version's behaviour) left
+            # sigma_fcst as NaN and every consumer downstream had to guess.
+            fallback = [
+                v for v in (o.sigma_rs, o.sigma_gk, o.sigma_bp) if v == v and v > 0.0
+            ]
+            o.sigma_fcst = min(fallback) if fallback else 1e-6
+
         # Guard against a forecast so small that sigma-normalised quantities
         # explode; one basis point per bar is below any tradeable instrument.
         o.sigma_fcst = max(o.sigma_fcst, 1e-6)

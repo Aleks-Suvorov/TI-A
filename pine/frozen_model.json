@@ -1,6 +1,6 @@
 {
   "schema_version": "2.0.0",
-  "generated_at": "2026-07-31T03:13:55+00:00",
+  "generated_at": "2026-07-31T07:06:29+00:00",
   "generator": "tia.export.export_frozen_model",
   "tia_version": "1.0.0",
   "config_manifest_hash": "20499f7708b16f27",
@@ -569,8 +569,8 @@
     "n_knots": 8,
     "min_samples": 200,
     "n_outcomes": 0,
-    "brier": -1000000000000000.0,
-    "ece": -1000000000000000.0,
+    "brier": null,
+    "ece": null,
     "interpolation": "linear between knots, clamped at the ends (numpy.interp semantics)"
   },
   "edge_book": {

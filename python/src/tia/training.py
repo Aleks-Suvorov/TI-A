@@ -26,7 +26,11 @@ Two properties make this legitimate rather than circular:
 *   The labels are purged and weighted. Candidates overlap heavily -- a
     twenty-bar horizon means twenty overlapping labels -- so uniqueness weighting
     is mandatory, not optional. Without it the effective sample size is
-    overstated several-fold and every credible interval is too narrow.
+    overstated and every credible interval is too narrow: measured here, 66
+    candidates carry 30.2 independent observations, and under denser overlap the
+    t-statistic inflation reaches 2.6x. The correction must use
+    :func:`~tia.labeling.weights.combined_effective_sample_size`; Kish's
+    statistic alone is scale-invariant and cannot see uniform overlap.
 
 For a real deployment the training pass runs on the development universe and the
 resulting book is frozen or slowly updated. Training and trading on the *same*
@@ -48,7 +52,7 @@ from .data.sessions import DAILY, SessionSpec
 from .engines.edgebook import EdgeBook, SetupFamily
 from .fusion.calibration import IsotonicCalibrator, fit_platt
 from .labeling.triple_barrier import apply_triple_barrier_to_bars
-from .labeling.weights import combined_weights, effective_sample_size
+from .labeling.weights import combined_effective_sample_size, combined_weights
 from .pipeline import TIA
 from .types import Bar, ExogenousSnapshot, Regime
 
@@ -215,7 +219,10 @@ def train_edge_book(
         exit_indices=res.exit_index,
         halflife_bars=cfg.edge_halflife_bars,
     )
-    ess = effective_sample_size(w)
+    # Overlap-aware, not Kish. Kish is scale-invariant and therefore blind to
+    # the uniform down-weighting that regularly spaced overlapping labels
+    # produce; using it inflated this t-statistic by up to 2.6x.
+    ess = combined_effective_sample_size(len(bars), res.entry_index, res.exit_index, w)
     diag["effective_sample_size"] = float(ess)
     diag["uniqueness_ratio"] = float(ess / max(len(candidates), 1))
 

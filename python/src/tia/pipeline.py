@@ -59,6 +59,7 @@ from .types import (
     Decision,
     EngineOutput,
     ExogenousSnapshot,
+    ExplainCard,
     FusionResult,
     Position,
     Regime,
@@ -344,6 +345,13 @@ class TIA:
 
     # ------------------------------------------------------------------ #
     def _null_decision(self, bar: Bar, why: str) -> Decision:
+        """A decision for a bar that never reached the kernel.
+
+        The reason is carried on the card rather than discarded. A rejected bar
+        is one of the few places where the system produces NO TRADE for a reason
+        that is not a gate condition, and an operator reading a run of silent
+        NO TRADEs deserves to be told the feed is the problem.
+        """
         return Decision(
             action=Action.NO_TRADE,
             decided_at_index=self._index,
@@ -351,7 +359,12 @@ class TIA:
             timestamp=bar.timestamp,
             position_before=self.policy.position,
             position_after=self.policy.position,
-            card=None,
+            card=ExplainCard(
+                headline="NO TRADE",
+                confidence_pct=math.nan,
+                rows=(("Data", "bar rejected"),),
+                veto_reasons=(why,),
+            ),
         )
 
     # ------------------------------------------------------------------ #

@@ -56,6 +56,8 @@ __all__ = [
     "linear_decay_weights",
     "combined_weights",
     "effective_sample_size",
+    "overlap_effective_sample_size",
+    "combined_effective_sample_size",
     "tstat_inflation_factor",
     "weighted_mean",
     "weighted_tstat",
@@ -243,11 +245,17 @@ def combined_weights(
 def effective_sample_size(weights: Sequence[float] | np.ndarray) -> float:
     """Kish's effective sample size ``(sum w)^2 / sum w^2``.
 
-    For equal weights this is exactly ``n``; for weights proportional to
-    uniqueness it is the number of independent observations the sample behaves
-    like. This is the ``n`` that belongs in every standard error, in
-    :func:`~tia.validation.metrics.probabilistic_sharpe_ratio` and in
-    :func:`~tia.validation.metrics.minimum_track_record_length`.
+    **This measures weight DISPERSION only, and by itself it does not correct for
+    overlap.** Kish is scale-invariant, so a set of labels that all share the same
+    average uniqueness -- the normal case when entries are regularly spaced --
+    carries no dispersion at all and this returns ``n``, however severe the
+    overlap. Measured on 300 labels with a 20-bar horizon entered every 3 bars,
+    Kish reported 293.5 where the genuinely independent count was 43.7, an
+    inflation of 2.59x in any t-statistic built on it.
+
+    Use :func:`combined_effective_sample_size` for the number that belongs in a
+    standard error. This function remains available because dispersion is a real
+    and separate effect -- time decay creates it even with no overlap at all.
     """
     w = np.asarray(weights, dtype=float).ravel()
     w = w[np.isfinite(w)]
@@ -260,17 +268,84 @@ def effective_sample_size(weights: Sequence[float] | np.ndarray) -> float:
     return s1 * s1 / s2
 
 
-def tstat_inflation_factor(weights: Sequence[float] | np.ndarray) -> float:
+def overlap_effective_sample_size(
+    n_bars: int,
+    entry_indices: Sequence[int] | np.ndarray,
+    exit_indices: Sequence[int] | np.ndarray,
+) -> float:
+    """Number of genuinely independent observations, ``sum(average uniqueness)``.
+
+    Lopez de Prado's measure: a label that shares its span with six others
+    contributes about one seventh of an observation. Unlike Kish's statistic this
+    is *not* scale-invariant and does not care whether the weights are uniform --
+    it counts non-overlapping information directly, which is the quantity a
+    standard error needs.
+    """
+    e, x = _check_spans(n_bars, entry_indices, exit_indices)
+    if e.size == 0:
+        return 0.0
+    return float(np.sum(average_uniqueness(n_bars, e, x)))
+
+
+def combined_effective_sample_size(
+    n_bars: int,
+    entry_indices: Sequence[int] | np.ndarray,
+    exit_indices: Sequence[int] | np.ndarray,
+    weights: Sequence[float] | np.ndarray | None = None,
+) -> float:
+    """Effective sample size accounting for **both** overlap and weight dispersion.
+
+    Two independent effects shrink a sample:
+
+    * *overlap* -- labels sharing a span carry the same information, measured by
+      :func:`overlap_effective_sample_size`;
+    * *dispersion* -- unequal weights (time decay) concentrate the sample on
+      fewer observations, measured by Kish.
+
+    They compose multiplicatively as retained fractions:
+
+    ``ESS = n * (sum(u)/n) * (Kish(w)/n) = sum(u) * Kish(w) / n``
+
+    With no overlap this reduces to Kish; with uniform weights it reduces to
+    ``sum(u)``. This is the ``n`` that belongs in every standard error, in
+    :func:`~tia.validation.metrics.probabilistic_sharpe_ratio` and in
+    :func:`~tia.validation.metrics.minimum_track_record_length`.
+    """
+    e, x = _check_spans(n_bars, entry_indices, exit_indices)
+    n = float(e.size)
+    if n <= 0.0:
+        return 0.0
+    ess_overlap = overlap_effective_sample_size(n_bars, e, x)
+    if weights is None:
+        return ess_overlap
+    kish = effective_sample_size(weights)
+    return float(ess_overlap * kish / n)
+
+
+def tstat_inflation_factor(
+    weights: Sequence[float] | np.ndarray,
+    n_bars: int | None = None,
+    entry_indices: Sequence[int] | np.ndarray | None = None,
+    exit_indices: Sequence[int] | np.ndarray | None = None,
+) -> float:
     """``sqrt(n / n_eff)``: how much a naive t-statistic overstates significance.
 
-    Multiply a naively computed t-statistic's *threshold* by this, or divide the
-    statistic itself. A value of 2.4 means a reported t of 2.4 is really a t of
-    1.0, i.e. no evidence at all.
+    Divide a naively computed t-statistic by this. A value of 2.4 means a
+    reported t of 2.4 is really a t of 1.0, i.e. no evidence at all.
+
+    Pass the label spans whenever they are available. Without them only weight
+    dispersion can be measured, and for regularly spaced overlapping labels that
+    is close to no correction at all.
     """
     w = np.asarray(weights, dtype=float).ravel()
     n = float(w[np.isfinite(w)].size)
-    ess = effective_sample_size(w)
-    if ess <= 0.0 or n <= 0.0:
+    if n <= 0.0:
+        return math.nan
+    if n_bars is not None and entry_indices is not None and exit_indices is not None:
+        ess = combined_effective_sample_size(n_bars, entry_indices, exit_indices, w)
+    else:
+        ess = effective_sample_size(w)
+    if ess <= 0.0:
         return math.nan
     return math.sqrt(n / ess)
 

@@ -16,9 +16,11 @@ The gated signal has **positive expectancy net of modelled costs**, pooled acros
 the development universe, at **t ≥ 3** after uniqueness weighting.
 
 The t-statistic must be computed against the **effective** sample size, not the
-trade count. Measured on synthetic data the uniqueness ratio is ~0.75, so the
-naive statistic overstates significance by ~1.15x; at longer horizons the factor
-approaches 4.
+trade count. Measured on synthetic data the uniqueness ratio is **0.46**, so the
+naive statistic overstates significance by ~1.5x even at this system's low
+eligibility rate; under dense overlap the factor reaches 2.6x. Note that the
+correct measure is `combined_effective_sample_size`, not Kish's statistic --
+Kish is scale-invariant and cannot see uniform overlap at all.
 
 ### H2 — Regime conditionality (the strong, falsifiable one)
 **The sign of the profitable action flips between the `TREND` and `REVERT`

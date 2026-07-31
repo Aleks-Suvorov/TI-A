@@ -70,8 +70,18 @@ responds to realised equity rather than to labels.
 ### A6. Sample weights correct for overlap adequately — **TESTABLE**
 Uniqueness weighting reduces the effective sample; whether it reduces it *enough*
 is an empirical question.
-**Test.** `effective_sample_size` vs candidate count (measured: ratio ~0.75); the
+**Test.** `combined_effective_sample_size` vs candidate count (measured on a
+6,000-bar synthetic run: 66 candidates, effective 30.2, ratio **0.46**); the
 t-statistic computed against the effective count is reported separately.
+
+**A correction worth recording.** This ratio was previously quoted as 0.75, from
+Kish's `(sum w)^2 / sum w^2` applied to the sample weights. Kish is
+scale-invariant, so it measures weight *dispersion* and is blind to the uniform
+down-weighting that regularly spaced overlapping labels produce -- on a stress
+case of 300 labels with a 20-bar horizon it returned 293.5 where the genuinely
+independent count was 43.7, a 2.6x inflation in any t-statistic built on it.
+The overlap-aware count is the sum of average uniqueness, and the two effects
+now compose as `sum(u) * Kish(w) / n`.
 
 ---
 
