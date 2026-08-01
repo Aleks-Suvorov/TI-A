@@ -497,6 +497,78 @@ class Config:
     def replace(self, **kw: Any) -> "Config":
         return dataclasses.replace(self, **kw)
 
+    def validate(self) -> list[str]:
+        """Sanity-check every parameter; return the list of violations.
+
+        The pipeline calls this at construction and refuses to start on a
+        non-empty result. A config file is operator input, and operator input
+        arrives with typos: a stop of -1.6, a probability floor of 5.8, a
+        window of zero. Each of those previously produced not an error but a
+        system that traded wrongly -- the most expensive possible failure mode
+        for a bad config value.
+        """
+        v: list[str] = []
+
+        def pos(name: str, minimum: float = 0.0) -> None:
+            x = getattr(self, name)
+            if not (x > minimum):
+                v.append(f"{name} = {x!r} must be > {minimum}")
+
+        def frac(name: str, lo: float = 0.0, hi: float = 1.0) -> None:
+            x = getattr(self, name)
+            if not (lo < x < hi):
+                v.append(f"{name} = {x!r} must be inside ({lo}, {hi})")
+
+        for name in ("vol_window", "vol_window_short", "vol_window_long",
+                     "rank_window", "vr_window", "participation_window",
+                     "perm_entropy_window", "correlation_window",
+                     "spread_estimator_window"):
+            x = getattr(self, name)
+            if not (isinstance(x, int) and x >= 2):
+                v.append(f"{name} = {x!r} must be an int >= 2")
+        if self.vol_window_short >= self.vol_window_long:
+            v.append("vol_window_short must be below vol_window_long")
+        if self.rank_min_obs > self.rank_window:
+            v.append("rank_min_obs cannot exceed rank_window")
+
+        for name in ("ewma_halflife", "stop_sigma", "target_sigma",
+                     "kalman_snr", "kalman_slope_snr", "fusion_evidence_sd",
+                     "edge_halflife_bars", "edge_prior_strength",
+                     "edge_pooling_strength", "cost_impact_eta",
+                     "regime_beta_concentration"):
+            pos(name)
+        if abs(sum(self.har_weights) - 1.0) > 1e-9 or any(w < 0 for w in self.har_weights):
+            v.append(f"har_weights = {self.har_weights!r} must be non-negative and sum to 1")
+
+        frac("regime_stickiness", 0.5, 1.0)
+        frac("regime_hazard_max")
+        frac("p_min", 0.5, 1.0)
+        frac("p_exit", 0.5, 1.0)
+        frac("edge_lcb_quantile", 0.0, 0.5)
+        frac("cv_embargo_frac", 0.0, 0.5)
+        frac("dd_throttle_start")
+        frac("dd_throttle_stop")
+        frac("dd_kill")
+        frac("dd_throttle_floor")
+        if not (self.dd_throttle_start < self.dd_throttle_stop < self.dd_kill):
+            v.append("drawdown thresholds must satisfy start < stop < kill")
+
+        for name in ("risk_per_trade", "max_risk_per_trade", "kelly_fraction"):
+            frac(name, 0.0, 1.0)
+        if self.risk_per_trade > self.max_risk_per_trade:
+            v.append("risk_per_trade cannot exceed max_risk_per_trade")
+
+        pos("ebe_min")
+        pos("max_trades_per_100_bars")
+        if self.execution_lag_bars < 1:
+            v.append(f"execution_lag_bars = {self.execution_lag_bars!r} must be >= 1: "
+                     "zero-lag execution is look-ahead by construction")
+        if not (self.min_holding_bars >= 1 and self.max_holding_bars > self.min_holding_bars):
+            v.append("holding bars must satisfy 1 <= min < max")
+        if self.target_sigma <= 0 or self.stop_sigma <= 0:
+            pass  # already reported by pos()
+        return v
+
     def by_provenance(self, provenance: Provenance) -> dict[str, Any]:
         return {
             f.name: getattr(self, f.name)

@@ -144,7 +144,7 @@ print(diag)     # includes effective_sample_size and t_stat_effective
 block. Training and trading the same bars is in-sample by construction.
 
 ```bash
-python3 -m pytest python/tests -q       # 90 tests, ~18s
+python3 -m pytest python/tests -q       # full suite, ~4 min
 ```
 
 ---
@@ -168,6 +168,7 @@ docs/
   12..16                   deployment, monitoring, learning, complexity, roadmap
   17-EVIDENCE-REVIEW.md    every concept graded A-F, kept or discarded, with reasons
   19-ADVERSARIAL-AUDIT.md  the red-team audit: five critical bugs, fixes, verdict
+  20-FINAL-REVIEW.md       the final board report: readiness, risk register, verdict
   18-LITERATURE.md         annotated bibliography
 python/src/tia/            the implementation (numpy only in the live path)
 python/tests/              90 tests; test_causality.py is the leakage auditor

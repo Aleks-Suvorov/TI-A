@@ -188,10 +188,28 @@ class DriftMonitor:
                 findings.append(f"Brier {r.brier:.3f} approaching alarm")
                 level = max(level, DemotionLevel.TIGHTENED)
             if r.skill == r.skill and r.skill < 0.0:
-                findings.append(
-                    f"Brier skill {r.skill:+.3f}: forecasts are worse than the base rate"
-                )
-                level = max(level, DemotionLevel.NO_TRADE)
+                if n >= cfg.calibration_min_samples:
+                    findings.append(
+                        f"Brier skill {r.skill:+.3f} on n={n}: forecasts are worse "
+                        "than the base rate"
+                    )
+                    level = max(level, DemotionLevel.NO_TRADE)
+                else:
+                    # Below the isotonic map's own sample floor, a negative
+                    # skill estimate is sampling noise, not evidence. The final
+                    # review board found a demonstrably healthy run demoted to
+                    # NO_TRADE at n=62 because gated selection lifts realized
+                    # success above the population forecast -- miscalibration in
+                    # the SAFE direction (under-confidence). Demoting on that
+                    # teaches operators to ignore the ladder, which is how
+                    # ladders die. It stays a visible finding; the absolute
+                    # Brier alarm still catches genuine breakage regardless of
+                    # sample size.
+                    findings.append(
+                        f"Brier skill {r.skill:+.3f} on n={n} (below "
+                        f"{cfg.calibration_min_samples}): noted, not actionable "
+                        "at this sample size"
+                    )
 
         if self._frozen:
             worst, worst_k = -math.inf, ""

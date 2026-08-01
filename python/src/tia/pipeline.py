@@ -49,6 +49,8 @@ from .engines.trend import TrendEngine
 from .engines.volatility import VolatilityEngine
 from .features.kernel import FeatureKernel
 from .fusion.calibration import OnlineCalibrator
+from .monitoring.drift import DemotionLevel, DriftMonitor
+from .monitoring.journal import DecisionJournal
 from .fusion.calop import CALOP
 from .risk.limits import RiskLimits
 from .risk.sizing import Sizer
@@ -107,8 +109,17 @@ class TIA:
         initial_equity: float = 1.0,
         learn: bool = True,
         history_limit: int | None = None,
+        journal_path: str | None = None,
     ) -> None:
         self.cfg = cfg or Config()
+        violations = self.cfg.validate()
+        if violations:
+            # Refusing to start beats trading wrongly. A config typo -- a
+            # negative stop, a probability floor of 5.8 -- previously produced
+            # not an error but a system that traded with it.
+            raise ValueError(
+                "invalid configuration:\n  " + "\n  ".join(violations)
+            )
         self.kernel = FeatureKernel(self.cfg, session)
         self.validator = BarValidator()
 
@@ -137,6 +148,18 @@ class TIA:
         self.limits = RiskLimits(self.cfg, initial_equity)
         self.learn = bool(learn)
 
+        # The safety layer. docs/13-MONITORING.md documented a demotion ladder
+        # and four kill switches; until this wiring existed, the ladder was
+        # never instantiated and only the drawdown switch could ever trip --
+        # the calibration, drift and slippage switches were dead code. A
+        # documented safety property that is not wired is worse than an
+        # undocumented one, because operators plan around it.
+        self.monitor = DriftMonitor(self.cfg)
+        self._monitor_every = 50
+        self.demotion = DemotionLevel.NORMAL
+        self.last_health = None
+        self.journal = DecisionJournal(journal_path, self.cfg.manifest_hash())
+
         # Research keeps everything; a live service must not. At one-minute bars
         # an unbounded decision log grows by roughly half a gigabyte a year, and
         # a signal system that quietly consumes memory for months is a system
@@ -161,6 +184,10 @@ class TIA:
         self.edge_book.reset()
         self.policy.reset()
         self.limits.reset(self.equity)
+        self.monitor.reset()
+        self.demotion = DemotionLevel.NORMAL
+        self.last_health = None
+        self.journal.lifecycle("reset")
         self.trades.clear()
         self.decisions.clear()
         self._index = -1
@@ -204,6 +231,19 @@ class TIA:
         self.calop.observe(outputs)
         fusion = self.calop.fuse(outputs, calibrate=self.calibrator)
 
+        if f.valid:
+            self.monitor.observe_features(f.as_dict())
+        if self._index % self._monitor_every == 0 and self._index > 0:
+            report = self.monitor.report(self.calop.diagnostics())
+            if report.brier == report.brier:
+                # Feed the calibration kill switch its input. RiskLimits owns
+                # the threshold; it can only act on what it is told.
+                self.limits.on_calibration(report.brier)
+            if report.level != self.demotion:
+                self.journal.health(report.level_name, report.findings)
+            self.demotion = report.level
+            self.last_health = report
+
         self._resolve_open_position(bar, f)
 
         setup = classify_setup(outputs, st.dominant, posterior)
@@ -236,6 +276,24 @@ class TIA:
         lim = self.limits.check()
         risk = None
         if spec is not None:
+            # Demotion-ladder responses flow through the existing gate rather
+            # than through a parallel mechanism, so every refusal keeps a named
+            # reason: TIGHTENED halves size, RESTRICTED requires a committed
+            # regime, NO_TRADE and above block entries outright.
+            demotion_blocks: tuple[str, ...] = ()
+            demotion_throttles: dict[str, float] = {}
+            if self.demotion >= DemotionLevel.NO_TRADE:
+                demotion_blocks = (
+                    f"monitor demotion: {DemotionLevel.NAMES[self.demotion]}",
+                )
+            elif self.demotion == DemotionLevel.RESTRICTED:
+                if max(posterior) < 0.75:
+                    demotion_blocks = (
+                        "monitor demotion: restricted to a committed regime "
+                        f"(max posterior {max(posterior):.2f} < 0.75)",
+                    )
+            elif self.demotion == DemotionLevel.TIGHTENED:
+                demotion_throttles["demotion_tightened"] = 0.5
             risk = self.sizer.size(
                 edge,
                 spec,
@@ -243,7 +301,8 @@ class TIA:
                 equity=self.equity,
                 price=bar.close,
                 drawdown_throttle=lim.throttle,
-                blocks=tuple(lim.triggered),
+                extra_throttles=demotion_throttles,
+                blocks=tuple(lim.triggered) + demotion_blocks,
             )
 
         action, gate, why = self.policy.step(
@@ -291,6 +350,7 @@ class TIA:
             card=card,
         )
         self.decisions.append(dec)
+        self.journal.decision(dec)
         if self.history_limit is not None:
             # Trim in blocks rather than one at a time: a list pop from the front
             # is O(n), and doing it every bar would make the pipeline quadratic.
@@ -378,6 +438,10 @@ class TIA:
             # actually traded.
             self.edge_book.observe(op.regime, int(op.setup), op.bucket, ret_sigma, weight=1.0)
             self.calibrator.record(op.p_at_entry, 1.0 if outcome > 0 else 0.0)
+        # The drift monitor sees every resolved outcome regardless of learn
+        # mode: monitoring live calibration is not optional, and a frozen-model
+        # deployment (learn=False) is precisely where decay must be caught.
+        self.monitor.observe_outcome(op.p_at_entry, 1.0 if outcome > 0 else 0.0)
 
         self.trades.append(
             TradeRecord(
@@ -398,6 +462,7 @@ class TIA:
                 cost_sigma=op.cost_sigma,
             )
         )
+        self.journal.trade(self.trades[-1])
         self._open_risk = 0.0
 
     # ------------------------------------------------------------------ #

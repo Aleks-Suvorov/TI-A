@@ -70,6 +70,7 @@ def bars_from_arrays(
     step_s: float = 86_400.0,
     substeps: int = 12,
     half_spread: float = 2.5e-4,
+    overnight_gap_sigma: float = 0.0,
 ) -> list[Bar]:
     """Build OHLC bars by simulating the intrabar path, not by drawing a range.
 
@@ -93,6 +94,16 @@ def bars_from_arrays(
         c = float(close[i])
         s = float(max(sigma[i], 1e-9))
         o = prev if i else c
+        if overnight_gap_sigma > 0.0 and i:
+            # Overnight gaps: the open prints away from the prior close. The
+            # adversarial audit (docs/19, D2) found that opens equal to prior
+            # closes made fill-timing bugs STRUCTURALLY INVISIBLE to every test
+            # in the suite -- the close-fill bug survived 1.19M assertions
+            # because this generator could not express the difference. This
+            # parameter exists so that gap-sensitive tests are possible; it
+            # defaults to 0.0 and draws no RNG when disabled, so every existing
+            # seeded test remains byte-identical.
+            o = prev * math.exp(overnight_gap_sigma * s * float(rng.standard_normal()))
         # Brownian bridge in log space from o to c over `substeps` increments.
         lo_o, lo_c = math.log(o), math.log(c)
         w = np.cumsum(rng.standard_normal(substeps)) / math.sqrt(substeps)
@@ -160,6 +171,7 @@ def generate_with_regimes(
     trend_strength: float = 0.06,
     revert_strength: float = 0.10,
     bars_per_session: int = 1,
+    overnight_gap_sigma: float = 0.0,
 ) -> tuple[list[Bar], SyntheticTruth]:
     """A market that genuinely alternates between persistence and reversion.
 
@@ -210,5 +222,7 @@ def generate_with_regimes(
         * np.exp(0.8 * (sigma / max(float(np.mean(sigma)), 1e-12) - 1.0))
         * np.exp(0.3 * rng.standard_normal(n))
     )
-    bars = bars_from_arrays(close, volume, sigma, rng)
+    bars = bars_from_arrays(
+        close, volume, sigma, rng, overnight_gap_sigma=overnight_gap_sigma
+    )
     return bars, SyntheticTruth(regime=regime, drift=drift, sigma=sigma)
