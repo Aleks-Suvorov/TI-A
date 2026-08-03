@@ -171,8 +171,11 @@ docs/
   20-FINAL-REVIEW.md       the final board report: readiness, risk register, verdict
   18-LITERATURE.md         annotated bibliography
 python/src/tia/            the implementation (numpy only in the live path)
-python/tests/              90 tests; test_causality.py is the leakage auditor
-pine/                      TradingView port + the frozen model it evaluates
+python/tests/              the suite; test_causality.py is the leakage auditor
+pine/
+  START_HERE_TRADINGVIEW.md  install, smoke test, troubleshooting — no coding
+  CHANGELOG_TRADINGVIEW.md   every port defect fixed, every feature omitted
+  TIA.pine / TIA_strategy.pine   the port, sharing one byte-identical core
 ```
 
 ---

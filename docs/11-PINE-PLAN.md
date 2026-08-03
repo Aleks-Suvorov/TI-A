@@ -113,8 +113,20 @@ calendar Pine does not have; consistent with the reference's behaviour of not
 applying the adjustment rather than assuming the calendar is clear.
 
 **Higher timeframe.** One view (`htf_multiple = 5`), not two. The 25× structural
-view would need a second `request.security` pair and adds little at Pine's
-warmup budget.
+view adds little at Pine's warmup budget.
+
+Since rc5 the port builds that view **without `request.security` at all**. Five
+closed chart bars are accumulated in-script into one higher-timeframe bar, which
+drives its own Kalman filter and its own high/low rings — the same causal
+aggregator the Python reference uses. Two reasons this is better than the
+security call it replaces, beyond the compile errors documented in
+`pine/CHANGELOG_TRADINGVIEW.md` C1–C2:
+
+* it is correct at *every* chart resolution, because there is no timeframe
+  string to assemble and therefore none to assemble wrongly;
+* it cannot look ahead by construction rather than by flag discipline. The
+  aggregate updates only when the fifth bar closes, so there is no in-progress
+  higher-timeframe bar for a historical signal to have peeked at.
 
 ---
 
@@ -142,7 +154,7 @@ lives in `docs/07-VALIDATION.md` and runs in Python.
 |---|---|
 | `request.security` without `lookahead_off` | serves the *completed* higher-timeframe bar to historical bars that could not have seen it — the classic backtest-only miracle |
 | `lookahead_off` but no `[1]` | the in-progress higher-timeframe bar still updates intrabar, so a historical signal changes as the bar forms |
-| **both together** | only fully-closed higher-timeframe bars reach the script — this is what the port does |
+| **both traps at once** | sidestepped entirely: since rc5 the port contains no `request.security`, and `test_pine_port.py::test_no_request_security_anywhere` fails the build if one returns |
 | `ta.pivothigh(l, r)` consumed at the pivot bar | the value is only *known* `r` bars later; the port tracks `pivotHighBar` and consumes the level from the bar it became visible |
 | Signals evaluated intrabar | every emission is guarded by `barstate.isconfirmed` |
 | Sweep marked at penetration | the port requires a later closed bar to reclaim the level; a sweep is knowable only after it fails |

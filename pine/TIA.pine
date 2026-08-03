@@ -1,53 +1,114 @@
-// TI-A — Adaptive, abstention-first trading signal framework
-// Non-repainting TradingView port. See docs/01-THEORY.md and docs/11-PINE-PLAN.md.
-//
-// WHAT THIS IS
-//   An evaluator for a model trained in Python. Pine cannot learn: there is no
-//   cross-session persistence, no optimiser, no way to accumulate an Edge Book
-//   across a universe, and no way to fit an isotonic calibration map. So every
-//   estimated quantity is frozen into the constants block below by
-//   `tia.export.export_frozen_model`, and this script only evaluates them.
-//
-// THE ONLY OUTPUTS
-//   BUY / SELL / SHORT / COVER / NO TRADE. SELL closes a long and never opens a
-//   short; COVER closes a short and never opens a long. LONG -> SHORT in one bar
-//   is forbidden. NO TRADE is by far the most common, by design: roughly 1% of
-//   bars are even structurally eligible before the expectancy gate applies.
-//
-// NON-REPAINTING
-//   Signals are emitted only on `barstate.isconfirmed`. Higher-timeframe data
-//   uses BOTH `expr[1]` and `lookahead_off` — see the comment at `f_htf()`,
-//   because using either alone is the single most common repainting bug in
-//   published Pine. Pivots are consumed only after their confirmation delay.
-//
-// WARMUP
-//   The rank window is 252 bars and the slowest higher-timeframe view needs 25x
-//   that in constituent bars. Expect no signals for the first ~350 bars.
-
 //@version=6
-indicator("TI-A", shorttitle="TI-A", overlay=true, max_bars_back=1000,
-     max_lines_count=200, max_labels_count=200)
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║ TI-A — adaptive, abstention-first trading indicator (TradingView port)    ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+//
+// TWO OPERATING MODES (Settings ▸ Inputs ▸ Mode):
+//
+//   A) "Frozen Research Model — NOT market-validated"
+//      Evaluates the model exported by the Python reference, through the
+//      original gate: a 90% lower credible bound on expectancy, net of
+//      modelled costs. That gate is deliberately NOT relaxed here. On most
+//      charts it will show NO TRADE forever, and the card prints the exact
+//      arithmetic (edge bound, cost, shortfall) so you can see why. That is
+//      the honest output of a model whose edge is unproven — not a bug.
+//
+//   B) "Practical Observation Mode"                       <- default
+//      The SAME feature stack and the SAME engines, gated by a
+//      reliability-weighted score with adjustable strictness, so a chart
+//      produces enough signals to observe and paper-test. It carries no
+//      claim of validation whatsoever and is backed by no backtest.
+//
+//      READ THIS ONE SENTENCE BEFORE USING MODE B. It was measured firing
+//      ~21 times per 4000 bars on a SYNTHETIC MARTINGALE -- a market with no
+//      edge in it at all, by construction. Mode A fired 0-1 times on the same
+//      data. Mode B is therefore a tool for SEEING what the engines react to,
+//      not evidence that what they react to is tradeable. If you want the
+//      gate that abstains on noise, that is Mode A, and its answer is
+//      usually "no trade".
+//
+// WHAT THIS IS NOT: it is not an RSI/MACD/moving-average crossover in a
+// costume. The evidence is a 4-state regime posterior (products of Beta
+// densities over rank features, zero parameters fitted to returns), a Kalman
+// local-linear-trend t-statistic, a liquidity-adjusted displacement ratio, a
+// volume-absorption measure, a confirmed-pivot sweep-and-fail detector, a
+// Lo-MacKinlay variance ratio, and permutation entropy - pooled with
+// correlation-aware weights rather than added up.
+//
+// NON-REPAINTING, STRUCTURALLY:
+//   * every signal is emitted only on a CONFIRMED (closed) bar;
+//   * no request.security() anywhere - the higher timeframe is aggregated
+//     inside the script from closed chart bars, so it is valid on 1m, 1h, 1D
+//     and 1W charts alike and cannot look ahead;
+//   * pivots are invisible until confirmed; a sweep is knowable only after it
+//     has failed; when a bar's range spans both barriers the STOP is taken,
+//     and a gap through the stop is treated as filled at the open.
+//
+// WARM-UP: ~300 bars. The card counts it down.
+// NOT INVESTMENT ADVICE. No profitability is claimed anywhere in this script.
+// See docs/20-FINAL-REVIEW.md for what is and is not established.
 
-// ============================================================================
-// Display inputs. NOTE: there are no *model* inputs. The trader configures
-// nothing that affects a signal — that is a design requirement, not an
-// oversight. Everything here is cosmetic or operational.
-// ============================================================================
-showCard      = input.bool(true,  "Show explanation card",  group="Display")
-showLevels    = input.bool(true,  "Show stop / target",     group="Display")
-showRegime    = input.bool(true,  "Tint background by regime", group="Display")
-cardSize      = input.string("Small", "Card text size", options=["Tiny","Small","Normal"], group="Display")
-accountRisk   = input.float(0.5,  "Risk per trade (% of equity)", minval=0.01, maxval=5.0, step=0.05, group="Operational")
+indicator("TI-A", shorttitle="TI-A", overlay=true, max_bars_back=500,
+     max_labels_count=100, max_lines_count=100)
+
+// ════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ════════════════════════════════════════════════════════════════════════════
+string MODE_A = "A: Frozen Research Model (not market-validated)"
+string MODE_B = "B: Practical Observation Mode"
+
+string modeIn      = input.string(MODE_B, "Operating mode", options=[MODE_B, MODE_A], group="Mode",
+     tooltip="A evaluates the exported research model through its original, unrelaxed gate and will almost never signal. B is a chart-practical gate built from the same features.")
+int    strictIn    = input.int(3, "Signal strictness (Mode B)", minval=1, maxval=5, group="Mode",
+     tooltip="1 = loose (most signals) ... 5 = strict (fewest). Mode B only; Mode A ignores it.")
+
+bool   allowLong   = input.bool(true,  "Allow long entries",  group="Direction")
+bool   allowShort  = input.bool(true,  "Allow short entries", group="Direction")
+
+bool   useHtfConf  = input.bool(true,  "Require higher-timeframe agreement", group="Filters")
+bool   useSession  = input.bool(false, "Limit entries to a session (intraday charts only)", group="Filters")
+string sessIn      = input.session("0930-1600", "Session", group="Filters")
+int    cooldownIn  = input.int(10, "Cooldown bars after an exit", minval=0, maxval=200, group="Filters")
+int    maxPer100In = input.int(6,  "Max entries per 100 bars", minval=1, maxval=50, group="Filters",
+     tooltip="Mode A always uses the frozen model's own rate limit instead of this value.")
+
+string STOP_ATR   = "ATR multiple"
+string STOP_VOL   = "Forecast volatility (model default)"
+string stopModeIn = input.string(STOP_VOL, "Stop / target basis", options=[STOP_VOL, STOP_ATR], group="Risk")
+float  atrMultIn  = input.float(2.0, "ATR multiple for the stop", minval=0.25, maxval=10.0, step=0.25, group="Risk")
+float  rrIn       = input.float(1.625, "Target : stop ratio (ATR mode)", minval=0.25, maxval=10.0, step=0.125, group="Risk",
+     tooltip="1.625 reproduces the frozen model's 2.6 sigma target against its 1.6 sigma stop.")
+
+bool   showCard   = input.bool(true,  "Show diagnostics card", group="Display")
+bool   showLevels = input.bool(true,  "Show signal / stop / target lines", group="Display")
+bool   showLabels = input.bool(true,  "Label entries with stop and target", group="Display")
+bool   showRegime = input.bool(true,  "Tint background by regime", group="Display")
+string cardSizeIn = input.string("Small", "Card text size", options=["Tiny", "Small", "Normal"], group="Display")
+string cardPosIn  = input.string("Top right", "Card position", options=["Top right", "Middle right", "Bottom right", "Top left", "Bottom left"], group="Display")
+
+bool isModeA = modeIn == MODE_A
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ==== BEGIN SHARED CORE ====
+// Everything between these markers is BYTE-IDENTICAL in TIA.pine and
+// TIA_strategy.pine, and python/tests/test_pine_port.py fails the build if it
+// ever stops being. The two scripts therefore cannot drift apart: whatever the
+// indicator paints, the strategy trades. Only the code after the END marker
+// differs -- the indicator draws, the strategy places orders.
+//
+// The core requires exactly two names from the host file: `isModeA` and
+// `strictIn`. It defines everything else it uses.
+// ══════════════════════════════════════════════════════════════════════════════
 
 // ==== BEGIN FROZEN MODEL (generated by tia.export) ====
 // Do not hand-edit. Regenerate with:
 //   python -m tia.export --out pine/frozen_model.json --emit pine/TIA.pine pine/TIA_strategy.pine
-// schema 2.0.0   generated 2026-08-01T23:53:25+00:00
+// schema 2.0.0   generated 2026-08-03T19:08:08+00:00
 // config manifest 20499f7708b16f27   placeholder=false
 
 FM_SCHEMA        = "2.0.0"
 FM_HASH          = "20499f7708b16f27"
-FM_GENERATED     = "2026-08-01T23:53:25+00:00"
+FM_GENERATED     = "2026-08-03T19:08:08+00:00"
 FM_PLACEHOLDER   = false
 
 // --- feature kernel ---------------------------------------------------
@@ -152,717 +213,884 @@ FM_DD_FLOOR      = 0.25
 FM_DD_KILL       = 0.25
 // ==== END FROZEN MODEL (generated by tia.export) ====
 
-// ============================================================================
-// Helpers
-// ============================================================================
+// ════════════════════════════════════════════════════════════════════════════
+// HELPERS
+// Every parameter is explicitly typed so Pine never has to infer a qualifier,
+// and every function is defined before its first use. No parameter name
+// shadows a built-in namespace - a parameter called `str` silently breaks
+// `str.split` for the rest of the script, and that bug shipped once already.
+// ════════════════════════════════════════════════════════════════════════════
+f_clip(float x, float lo, float hi) =>
+    na(x) ? (lo + hi) * 0.5 : math.max(lo, math.min(hi, x))
 
-// Parse a comma-separated constant into a float array. Done once, on the first
-// bar: Pine cannot read files, so frozen vectors travel as string literals.
-f_parseFloats(csv) =>
-    out = array.new<float>(0)
+f_safediv(float a, float b, float d) =>
+    na(a) or na(b) or b == 0.0 ? d : a / b
+
+f_slog(float x) =>
+    // log with a guarded argument: never zero, never negative, never na.
+    math.log(math.max(nz(x, 1.0e-12), 1.0e-12))
+
+f_logistic(float x) =>
+    1.0 / (1.0 + math.exp(-f_clip(x, -60.0, 60.0)))
+
+f_ewmaAlpha(float halflife) =>
+    1.0 - math.pow(0.5, 1.0 / math.max(halflife, 0.5))
+
+f_parseFloats(string csv) =>
+    float[] out = array.new_float(0)
     if csv != ""
-        parts = str.split(csv, ",")
+        string[] parts = str.split(csv, ",")
         for i = 0 to array.size(parts) - 1
-            v = str.tonumber(array.get(parts, i))
+            float v = str.tonumber(array.get(parts, i))
             array.push(out, na(v) ? 0.0 : v)
     out
 
-var float[] DESIGN_A    = f_parseFloats(FM_RG_A)
-var float[] DESIGN_B    = f_parseFloats(FM_RG_B)
-var float[] DESIGN_LOGN = f_parseFloats(FM_RG_LOGNORM)
-var float[] PRECISION   = f_parseFloats(FM_ENG_PREC)
-var float[] ISO_X       = f_parseFloats(FM_ISO_X)
-var float[] ISO_Y       = f_parseFloats(FM_ISO_Y)
-var float[] BUCKET_EDGE = f_parseFloats(FM_EB_EDGES)
-var float[] EDGE_MU     = f_parseFloats(FM_EB_MU)
-var float[] EDGE_SCALE  = f_parseFloats(FM_EB_SCALE)
-var float[] EDGE_DOF    = f_parseFloats(FM_EB_DOF)
-var float[] EDGE_NEFF   = f_parseFloats(FM_EB_NEFF)
-
-f_clip(x, lo, hi) => na(x) ? (lo + hi) * 0.5 : math.max(lo, math.min(hi, x))
-f_safediv(a, b, d) => (b == 0 or na(b) or na(a)) ? d : a / b
-f_logistic(x) => 1.0 / (1.0 + math.exp(-f_clip(x, -60.0, 60.0)))
-
-// Inverse standard normal CDF, Moro/Acklam-style rational approximation.
-// Pine has no ppf; this is accurate to ~1e-9 across the domain, which is orders
-// of magnitude better than the estimation error of anything it is applied to.
-f_normPpf(p) =>
-    pp = f_clip(p, 1e-12, 1 - 1e-12)
+f_normPpf(float p) =>
+    // Acklam's rational approximation to the inverse normal CDF, |err| ~1e-9.
+    float pp = f_clip(p, 1.0e-12, 1.0 - 1.0e-12)
     float res = 0.0
     if pp < 0.02425
-        q = math.sqrt(-2.0 * math.log(pp))
+        float q = math.sqrt(-2.0 * math.log(pp))
         res := (((((-0.007784894002430293 * q - 0.3223964580411365) * q - 2.400758277161838) * q - 2.549732539343734) * q + 4.374664141464968) * q + 2.938163982698783) / ((((0.007784695709041462 * q + 0.3224671290700398) * q + 2.445134137142996) * q + 3.754408661907416) * q + 1.0)
-    else if pp > 1 - 0.02425
-        q = math.sqrt(-2.0 * math.log(1 - pp))
+    else if pp > 0.97575
+        float q = math.sqrt(-2.0 * math.log(1.0 - pp))
         res := -(((((-0.007784894002430293 * q - 0.3223964580411365) * q - 2.400758277161838) * q - 2.549732539343734) * q + 4.374664141464968) * q + 2.938163982698783) / ((((0.007784695709041462 * q + 0.3224671290700398) * q + 2.445134137142996) * q + 3.754408661907416) * q + 1.0)
     else
-        q = pp - 0.5
-        r = q * q
+        float q = pp - 0.5
+        float r = q * q
         res := (((((-39.69683028665376 * r + 220.9460984245205) * r - 275.9285104469687) * r + 138.3577518672690) * r - 30.66479806614716) * r + 2.506628277459239) * q / (((((-54.47609879822406 * r + 161.5858368580409) * r - 155.6989798598866) * r + 66.80131188771972) * r - 13.28068155288572) * r + 1.0)
     res
 
-// Inverse Student-t via the Cornish-Fisher expansion. Identical to the Python
-// reference in tia/engines/edgebook.py:student_t_ppf, so the two agree to the
-// tolerance stated in docs/11-PINE-PLAN.md.
-f_studentTPpf(p, dof) =>
+f_studentTPpf(float p, float dof) =>
+    // Cornish-Fisher expansion, the same one the Python reference uses in
+    // tia/engines/edgebook.py, so the two agree to ~1e-2 at the degrees of
+    // freedom this model actually reaches.
     float res = 0.0
     if dof <= 2.0
         res := f_normPpf(p) * 4.0
     else
-        z  = f_normPpf(p)
-        z2 = z * z
-        z3 = z2 * z
-        z5 = z3 * z2
-        z7 = z5 * z2
-        g1 = (z3 + z) / 4.0
-        g2 = (5.0 * z5 + 16.0 * z3 + 3.0 * z) / 96.0
-        g3 = (3.0 * z7 + 19.0 * z5 + 17.0 * z3 - 15.0 * z) / 384.0
+        float z  = f_normPpf(p)
+        float z2 = z * z
+        float z3 = z2 * z
+        float z5 = z3 * z2
+        float z7 = z5 * z2
+        float g1 = (z3 + z) / 4.0
+        float g2 = (5.0 * z5 + 16.0 * z3 + 3.0 * z) / 96.0
+        float g3 = (3.0 * z7 + 19.0 * z5 + 17.0 * z3 - 15.0 * z) / 384.0
         res := z + g1 / dof + g2 / (dof * dof) + g3 / (dof * dof * dof)
     res
 
-// Piecewise-linear interpolation of the frozen isotonic map, matching
-// numpy.interp semantics (clamped at both ends).
-f_interp(x, xs, ys) =>
-    n = array.size(xs)
+f_interp(float x, float[] xs, float[] ys) =>
+    // numpy.interp semantics: linear between knots, clamped at both ends.
+    int n = array.size(xs)
     float out = x
-    if n >= 2
+    if n >= 2 and array.size(ys) == n
         if x <= array.get(xs, 0)
             out := array.get(ys, 0)
         else if x >= array.get(xs, n - 1)
             out := array.get(ys, n - 1)
         else
-            int i = 0
+            int hit = 1
             for k = 1 to n - 1
-                if i == 0 and array.get(xs, k) >= x
-                    i := k
-            x0 = array.get(xs, i - 1)
-            x1 = array.get(xs, i)
-            y0 = array.get(ys, i - 1)
-            y1 = array.get(ys, i)
-            w  = f_safediv(x - x0, x1 - x0, 0.0)
+                if array.get(xs, k) >= x
+                    hit := k
+                    break
+            float x0 = array.get(xs, hit - 1)
+            float x1 = array.get(xs, hit)
+            float y0 = array.get(ys, hit - 1)
+            float y1 = array.get(ys, hit)
+            float w  = f_safediv(x - x0, x1 - x0, 0.0)
             out := y0 + w * (y1 - y0)
     out
 
-// ============================================================================
-// L1  Feature kernel  (docs/01-THEORY.md §2-§4)
-// ============================================================================
-logC = math.log(close)
-ret  = na(close[1]) ? na : math.log(close / close[1])
-absR = math.abs(ret)
+f_betaLogPdf(float x, float a, float b) =>
+    // KERNEL ONLY. The ln B(a,b) normaliser is SUBTRACTED at the call site
+    // from the exported FM_RG_LOGNORM table. docs/19-ADVERSARIAL-AUDIT.md D5:
+    // omitting it tilted the posterior by up to 4.2 log units, and adding it
+    // instead of subtracting doubled the damage. Do not "simplify" this.
+    float xx = f_clip(x, 1.0e-6, 1.0 - 1.0e-6)
+    (a - 1.0) * math.log(xx) + (b - 1.0) * math.log(1.0 - xx)
 
-// -- Volatility ---------------------------------------------------------------
-// Bipower variation: jump-robust, and therefore the correct denominator when
-// asking "was this move large?" (§2.1). Realised variance is kept alongside so
-// their difference isolates jump variation.
-bpSum   = math.sum(absR * nz(absR[1]), FM_VOL_N)
-sigmaBp = math.sqrt(math.max(1.5707963267948966 * bpSum / (FM_VOL_N - 1), 1e-16))
-rvMid   = math.sum(ret * ret, FM_VOL_N) / FM_VOL_N
-sigmaRv = math.sqrt(math.max(rvMid, 1e-16))
-sigmaS  = math.sqrt(math.max(math.sum(ret * ret, FM_VOL_NS) / FM_VOL_NS, 1e-16))
-sigmaL  = math.sqrt(math.max(math.sum(ret * ret, FM_VOL_NL) / FM_VOL_NL, 1e-16))
-jumpShare = f_clip(f_safediv(sigmaRv * sigmaRv - sigmaBp * sigmaBp, sigmaRv * sigmaRv, 0.0), 0.0, 1.0)
+// ════════════════════════════════════════════════════════════════════════════
+// FROZEN-MODEL ARRAYS
+// Parsed once, lazily. The guard is "still empty?" rather than
+// barstate.isfirst, so a chart that re-seeds its history heals itself.
+// ════════════════════════════════════════════════════════════════════════════
+var float[] DESIGN_A    = array.new_float(0)
+var float[] DESIGN_B    = array.new_float(0)
+var float[] DESIGN_LOGN = array.new_float(0)
+var float[] PRECISION   = array.new_float(0)
+var float[] ISO_X       = array.new_float(0)
+var float[] ISO_Y       = array.new_float(0)
+var float[] BUCKET_EDGE = array.new_float(0)
+var float[] EDGE_MU     = array.new_float(0)
+var float[] EDGE_SCALE  = array.new_float(0)
+var float[] EDGE_DOF    = array.new_float(0)
+var float[] EDGE_NEFF   = array.new_float(0)
 
-// Rogers-Satchell: drift-independent, which matters precisely in the trending
-// conditions where a position might be sized.
-rsTerm  = math.log(high / close) * math.log(high / open) + math.log(low / close) * math.log(low / open)
-sigmaRs = math.sqrt(math.max(math.sum(rsTerm, FM_VOL_N) / FM_VOL_N, 1e-16))
+if array.size(DESIGN_A) == 0
+    DESIGN_A    := f_parseFloats(FM_RG_A)
+    DESIGN_B    := f_parseFloats(FM_RG_B)
+    DESIGN_LOGN := f_parseFloats(FM_RG_LOGNORM)
+    PRECISION   := f_parseFloats(FM_ENG_PREC)
+    ISO_X       := f_parseFloats(FM_ISO_X)
+    ISO_Y       := f_parseFloats(FM_ISO_Y)
+    BUCKET_EDGE := f_parseFloats(FM_EB_EDGES)
+    EDGE_MU     := f_parseFloats(FM_EB_MU)
+    EDGE_SCALE  := f_parseFloats(FM_EB_SCALE)
+    EDGE_DOF    := f_parseFloats(FM_EB_DOF)
+    EDGE_NEFF   := f_parseFloats(FM_EB_NEFF)
 
-alphaEw = 2.0 / (2.0 * FM_EWMA_HL + 1.0)
+int  NREG  = 4
+int  NFEAT = 8
+int  NENG  = FM_ENG_M
+bool modelOk  = array.size(DESIGN_A) == NREG * NFEAT and array.size(DESIGN_B) == NREG * NFEAT and array.size(DESIGN_LOGN) == NREG * NFEAT
+bool fusionOk = array.size(PRECISION) == NENG * NENG
+bool bookOk   = array.size(EDGE_MU) == NREG * FM_EB_NSETUP * FM_EB_NBUCKET
+
+// ════════════════════════════════════════════════════════════════════════════
+// L1 - FEATURE KERNEL (docs/01-THEORY.md 2-4)
+// ════════════════════════════════════════════════════════════════════════════
+int WARMUP_BARS = FM_RANK_N + 48
+
+float ret  = na(close[1]) or close[1] <= 0.0 ? float(na) : math.log(close / close[1])
+float absR = math.abs(nz(ret, 0.0))
+
+// -- volatility: bipower (jump-robust), realised, Rogers-Satchell, EWMA, HAR --
+float bpSum   = math.sum(absR * nz(absR[1], 0.0), FM_VOL_N)
+float sigmaBp = math.sqrt(math.max(1.5707963267948966 * bpSum / float(FM_VOL_N - 1), 1.0e-16))
+float rvMid   = math.sum(nz(ret * ret, 0.0), FM_VOL_N) / float(FM_VOL_N)
+float sigmaRv = math.sqrt(math.max(rvMid, 1.0e-16))
+float sigmaS  = math.sqrt(math.max(math.sum(nz(ret * ret, 0.0), FM_VOL_NS) / float(FM_VOL_NS), 1.0e-16))
+float sigmaL  = math.sqrt(math.max(math.sum(nz(ret * ret, 0.0), FM_VOL_NL) / float(FM_VOL_NL), 1.0e-16))
+float jumpShare = f_clip(f_safediv(sigmaRv * sigmaRv - sigmaBp * sigmaBp, sigmaRv * sigmaRv, 0.0), 0.0, 1.0)
+
+float rsTerm  = f_slog(high / close) * f_slog(high / open) + f_slog(low / close) * f_slog(low / open)
+float sigmaRs = math.sqrt(math.max(math.sum(rsTerm, FM_VOL_N) / float(FM_VOL_N), 1.0e-16))
+
 var float ewVar = na
-ewVar := na(ewVar) ? rvMid : alphaEw * ret * ret + (1 - alphaEw) * ewVar
-sigmaEw = math.sqrt(math.max(nz(ewVar, rvMid), 1e-16))
+float alphaEw = f_ewmaAlpha(FM_EWMA_HL)
+ewVar := na(ewVar) ? rvMid : alphaEw * nz(ret * ret, rvMid) + (1.0 - alphaEw) * ewVar
+float sigmaEw = math.sqrt(math.max(nz(ewVar, rvMid), 1.0e-16))
 
-// Geometric HAR blend (§2.2). Weights are a THEORY parameter, deliberately not
-// fitted, so this contributes nothing to the fitted degree-of-freedom count.
-wD = FM_HAR_D
-wW = FM_HAR_W
-wM = FM_HAR_M
-sigmaFcst = math.max(math.exp(wD * math.log(sigmaS) + wW * math.log(sigmaRv) + wM * math.log(sigmaL)), 1e-8)
+// Geometric HAR blend. The weights are a THEORY parameter, deliberately never
+// fitted. Falls back to the range scale on a dead tape - halted instrument,
+// pegged rate - instead of dividing by a vanishing number.
+float sigmaFcst = math.max(math.exp(FM_HAR_D * f_slog(sigmaS) + FM_HAR_W * f_slog(sigmaRv) + FM_HAR_M * f_slog(sigmaL)), 1.0e-8)
+if sigmaS <= 1.001e-8 and sigmaRv <= 1.001e-8
+    sigmaFcst := math.max(sigmaRs, 1.0e-6)
 
-volRank     = ta.percentrank(math.log(sigmaFcst), FM_RANK_N) / 100.0
-compression = 1.0 - ta.percentrank(f_safediv(sigmaS, sigmaL, 1.0), FM_RANK_N) / 100.0
-volRatio    = f_safediv(sigmaEw, sigmaFcst, 1.0)
-rangeSigma  = f_safediv(math.log(high / low), sigmaFcst, 1.3)
+float volRank     = nz(ta.percentrank(f_slog(sigmaFcst), FM_RANK_N), 50.0) / 100.0
+float compression = 1.0 - nz(ta.percentrank(f_safediv(sigmaS, sigmaL, 1.0), FM_RANK_N), 50.0) / 100.0
+float volRatio    = f_safediv(sigmaEw, sigmaFcst, 1.0)
+float rangeSigma  = f_clip(f_safediv(f_slog(high / low), sigmaFcst, 1.3), 0.0, 8.0)
+float atrVal      = ta.atr(14)
 
-// -- Microstructure: LADR and absorption (§3.1) -------------------------------
-// Participation is dollar volume against its own recent median. The Python
-// reference conditions this on a time-of-day bucket to remove the intraday
-// U-shape; Pine's per-bar cost makes 13 rolling medians expensive, so this uses
-// a single rolling median and the approximation is documented in the plan doc.
-dollarVol  = ((high + low + close) / 3.0) * volume
-medVol     = ta.median(dollarVol, FM_PART_N)
-participation = f_safediv(dollarVol, medVol, na)
-partRank   = ta.percentrank(nz(participation, 1.0), FM_RANK_N) / 100.0
+// -- liquidity: participation, LADR, absorption (docs/01-THEORY.md 3.1) -------
+// Instruments with no volume feed - many FX and index symbols - degrade
+// gracefully: the liquidity features go neutral and the card says so, rather
+// than the script dying or silently pretending volume exists.
+float volRaw = nz(volume, 0.0)
+var bool hasVolume = false
+hasVolume := hasVolume or volRaw > 0.0
+float dollarVol = hasVolume ? (high + low + close) / 3.0 * volRaw : 1.0
+float medVol    = ta.median(dollarVol, FM_PART_N)
+float participation = hasVolume ? f_clip(f_safediv(dollarVol, math.max(medVol, 1.0e-12), 1.0), 0.0, 50.0) : 1.0
+float partRank  = hasVolume ? nz(ta.percentrank(participation, FM_RANK_N), 50.0) / 100.0 : 0.5
 
-dNorm = f_safediv(ret, sigmaBp, na)
-adNorm = math.abs(nz(dNorm, 0.0))
-ladrAbs = na(participation) or participation <= 0 ? na : adNorm / math.pow(participation, FM_PSI)
-ladr    = na(ladrAbs) ? na : (ret >= 0 ? ladrAbs : -ladrAbs)
-ladrRank = ta.percentrank(nz(ladrAbs, 0.0), FM_RANK_N) / 100.0
-absorption = na(participation) ? na : participation / (adNorm + 1e-6)
-absRank  = ta.percentrank(math.log(1.0 + nz(absorption, 0.0)), FM_RANK_N) / 100.0
+float dNorm    = f_safediv(nz(ret, 0.0), sigmaBp, 0.0)
+float adNorm   = math.abs(dNorm)
+float ladrAbs  = f_safediv(adNorm, math.pow(math.max(participation, 1.0e-12), FM_PSI), 0.0)
+float ladr     = nz(ret, 0.0) >= 0.0 ? ladrAbs : -ladrAbs
+float ladrRank = nz(ta.percentrank(ladrAbs, FM_RANK_N), 50.0) / 100.0
+float absorption = f_safediv(participation, adNorm + 1.0e-6, 0.0)
+float absRank    = hasVolume ? nz(ta.percentrank(math.log(1.0 + absorption), FM_RANK_N), 50.0) / 100.0 : 0.5
 
-clv     = (high - low) <= 0 ? 0.0 : (2.0 * close - high - low) / (high - low)
-clvEma  = ta.ema(clv, 5)
+float clv    = high - low <= 0.0 ? 0.0 : (2.0 * close - high - low) / (high - low)
+float clvEma = ta.ema(clv, FM_CLV_HL)
 
-// -- Effective spread, Corwin & Schultz (§3.3) --------------------------------
-// Uses the bar pair (t-1, t), NEVER (t, t+1). Written the natural way this
-// estimator is trivially forward-looking, and published implementations
-// frequently are. Aggregated by rolling MEDIAN: the Python reference found mean
-// aggregation over-estimates a known 8bp spread by roughly 7x, because the
-// per-pair estimates have a heavy right tail.
-csK    = 3.0 - 2.0 * math.sqrt(2.0)
-hlPrev = math.log(high[1] / low[1])
-hlNow  = math.log(high / low)
-h2     = math.max(high, high[1])
-l2     = math.min(low, low[1])
-hlTwo  = math.log(h2 / l2)
-csBeta = hlPrev * hlPrev + hlNow * hlNow
-csGam  = hlTwo * hlTwo
-csAlph = (math.sqrt(2.0 * csBeta) - math.sqrt(csBeta)) / csK - math.sqrt(math.max(csGam, 0.0) / csK)
-csRaw  = math.max(2.0 * (math.exp(csAlph) - 1.0) / (1.0 + math.exp(csAlph)), 0.0)
-spreadRel = nz(ta.median(csRaw, FM_SPREAD_N), FM_COST_SFALL)
-
-// -- Kalman local linear trend (§4.1) -----------------------------------------
-// Both process and observation covariances scale with the FORECAST volatility,
-// which is what makes the filter adapt with no user setting: slow in turbulence,
-// sharp in calm. The output is a t-statistic, not a slope — a slope has units of
-// price per bar and any threshold on it encodes an unexamined volatility
-// assumption. Forward recursion only; the smoother would repaint.
+// -- Kalman local linear trend (docs/01-THEORY.md 4.1); forward pass only -----
 var float kLev = na
 var float kSlp = 0.0
 var float kP00 = na
 var float kP01 = 0.0
 var float kP11 = na
-s2 = sigmaFcst * sigmaFcst
+float s2   = sigmaFcst * sigmaFcst
+float logC = f_slog(close)
 if na(kLev)
     kLev := logC
     kP00 := 100.0 * s2
     kP11 := s2
 else
-    // Predict
     kLev := kLev + kSlp
-    p00 = kP00 + 2.0 * kP01 + kP11 + FM_KAL_SNR * s2
-    p01 = kP01 + kP11
-    p11 = kP11 + FM_KAL_SNR_SLOPE * s2
-    // Update
-    S    = p00 + s2
-    k0   = p00 / S
-    k1   = p01 / S
-    resid = logC - kLev
+    float p00 = kP00 + 2.0 * kP01 + kP11 + FM_KAL_SNR * s2
+    float p01 = kP01 + kP11
+    float p11 = kP11 + FM_KAL_SNR_SLOPE * s2
+    float innovVar = p00 + s2
+    float k0 = f_safediv(p00, innovVar, 0.0)
+    float k1 = f_safediv(p01, innovVar, 0.0)
+    float resid = logC - kLev
     kLev := kLev + k0 * resid
     kSlp := kSlp + k1 * resid
-    kP00 := p00 - k0 * p00
+    kP00 := math.max(p00 - k0 * p00, 1.0e-18)
     kP01 := p01 - k0 * p01
-    kP11 := math.max(p11 - k1 * p01, 1e-300)
-slopeT = bar_index < 5 ? na : f_safediv(kSlp, math.sqrt(kP11), na)
+    kP11 := math.max(p11 - k1 * p01, 1.0e-18)
+float slopeT = bar_index < 5 ? float(na) : f_safediv(kSlp, math.sqrt(kP11), float(na))
 
-// -- Lo-MacKinlay variance ratio (§4.2) ---------------------------------------
-// The heteroskedasticity-robust form. The homoskedastic statistic rejects the
-// martingale null in every volatility cluster for that reason alone, producing a
-// spurious "trend" reading precisely when volatility rises. Pine cannot afford
-// the full delta_j sum at four horizons every bar, so this uses the
-// homoskedastic ratio divided by a frozen null standard deviation calibrated on
-// the development universe — an approximation, quantified in the plan doc.
-// The four horizons are written out rather than looped. `math.sum` and
-// `ta.variance` require a SIMPLE int length; a function parameter is
-// series-qualified, and while Pine will often specialise a call site with a
-// literal argument, relying on that is how a script compiles on one build and
-// not the next. Literals remove the question.
-var1 = ta.variance(ret, FM_VR_N)
-f_vrterm(varq, q) =>
-    vr = f_safediv(varq / q, var1, 1.0)
-    (vr - 1.0) * math.sqrt(FM_VR_N / (2.0 * (q - 1.0)))
-vrZ2  = f_vrterm(ta.variance(math.sum(ret, 2),  FM_VR_N), 2)
-vrZ4  = f_vrterm(ta.variance(math.sum(ret, 4),  FM_VR_N), 4)
-vrZ8  = f_vrterm(ta.variance(math.sum(ret, 8),  FM_VR_N), 8)
-vrZ16 = f_vrterm(ta.variance(math.sum(ret, 16), FM_VR_N), 16)
-vrZ = (vrZ2 + vrZ4 + vrZ8 + vrZ16) / 4.0
-vrRank = ta.percentrank(nz(vrZ, 0.0), FM_RANK_N) / 100.0
+// -- Lo-MacKinlay variance ratio, homoskedastic form, frozen null scale ------
+// The heteroskedasticity-robust theta(q) correction is a documented
+// Python-only refinement (docs/11-PINE-PLAN.md 3) and is this port's largest
+// known approximation. The four lags are inlined because Pine requires a
+// compile-time constant length for math.sum, so FM_VR_LAGS cannot drive them.
+float var1 = ta.variance(nz(ret, 0.0), FM_VR_N)
+f_vrterm(float varq, float q) =>
+    float vr = f_safediv(varq / q, var1, 1.0)
+    (vr - 1.0) * math.sqrt(float(FM_VR_N) / (2.0 * (q - 1.0)))
+float vrZ2  = f_vrterm(ta.variance(math.sum(nz(ret, 0.0), 2),  FM_VR_N), 2.0)
+float vrZ4  = f_vrterm(ta.variance(math.sum(nz(ret, 0.0), 4),  FM_VR_N), 4.0)
+float vrZ8  = f_vrterm(ta.variance(math.sum(nz(ret, 0.0), 8),  FM_VR_N), 8.0)
+float vrZ16 = f_vrterm(ta.variance(math.sum(nz(ret, 0.0), 16), FM_VR_N), 16.0)
+float vrZ   = (vrZ2 + vrZ4 + vrZ8 + vrZ16) / 4.0
+float vrRank = nz(ta.percentrank(nz(vrZ, 0.0), FM_RANK_N), 50.0) / 100.0
 
-// -- Path efficiency and permutation entropy ----------------------------------
-efficiency = f_clip(math.abs(f_safediv(math.sum(ret, FM_VOL_N), math.sum(absR, FM_VOL_N), 0.0)), 0.0, 1.0)
+float efficiency = f_clip(math.abs(f_safediv(math.sum(nz(ret, 0.0), FM_EFF_N), math.sum(absR, FM_EFF_N), 0.0)), 0.0, 1.0)
 
-// Permutation entropy of order 3 (Bandt & Pompe): depends only on the ordinal
-// pattern of three consecutive closes, so it is invariant to any monotone
-// transform of price and needs no binning choice.
-p0 = close
-p1 = close[1]
-p2 = close[2]
-pat = (p2 < p1 ? (p1 < p0 ? 0 : (p2 < p0 ? 1 : 2)) : (p1 < p0 ? (p2 < p0 ? 3 : 4) : 5))
-float peSum = 0.0
-for k = 0 to 5
-    cnt = 0
-    for j = 0 to FM_PE_N - 1
-        if pat[j] == k
-            cnt += 1
-    pk = cnt / FM_PE_N
-    peSum += pk > 0 ? -pk * math.log(pk) : 0.0
-permEntropy = f_clip(peSum / math.log(6.0), 0.0, 1.0)
+// -- permutation entropy, order 3, O(1) per bar via ring-buffered counts ------
+// The previous build re-read 360 bars of history through a dynamic index on
+// every bar: a runtime-error and performance trap. Same statistic, var arrays.
+var int[] peCounts = array.new_int(6, 0)
+var int[] peRing   = array.new_int(FM_PE_N, -1)
+var int   peHead   = 0
+var int   peFilled = 0
+float c0  = close
+float c1  = nz(close[1], close)
+float c2n = nz(close[2], close)
+int pat = c2n < c1 ? (c1 < c0 ? 0 : c2n < c0 ? 1 : 2) : c1 < c0 ? (c2n < c0 ? 3 : 4) : 5
+if bar_index >= 2
+    int evict = array.get(peRing, peHead)
+    if evict >= 0
+        array.set(peCounts, evict, math.max(array.get(peCounts, evict) - 1, 0))
+    array.set(peRing, peHead, pat)
+    array.set(peCounts, pat, array.get(peCounts, pat) + 1)
+    peHead   := (peHead + 1) % FM_PE_N
+    peFilled := math.min(peFilled + 1, FM_PE_N)
+float permEntropy = 0.5
+if peFilled >= 20
+    float peSum = 0.0
+    for k = 0 to 5
+        float pk = float(array.get(peCounts, k)) / float(peFilled)
+        peSum += pk > 0.0 ? -pk * math.log(pk) : 0.0
+    permEntropy := f_clip(peSum / math.log(6.0), 0.0, 1.0)
 
-// -- Structure: pivots confirmed only after the delay (§4.3) ------------------
-// ta.pivothigh(left, right) is only KNOWN `right` bars after the pivot bar, so
-// consuming it without the offset would read the future. The `[FM_PIV_CONFIRM]`
-// offset on the value, plus using ta.valuewhen on the already-lagged series, is
-// what makes this causal.
-ph = ta.pivothigh(high, FM_PIV_CONFIRM, FM_PIV_CONFIRM)
-pl = ta.pivotlow(low,  FM_PIV_CONFIRM, FM_PIV_CONFIRM)
-var float pivotHigh = na
-var float pivotLow  = na
-var int   pivotHighBar = na
-var int   pivotLowBar  = na
+// -- structure: pivots exist only after their confirmation delay --------------
+float ph = ta.pivothigh(high, FM_PIV_CONFIRM, FM_PIV_CONFIRM)
+float pl = ta.pivotlow(low,  FM_PIV_CONFIRM, FM_PIV_CONFIRM)
+var float pivotHigh    = na
+var float pivotLow     = na
+var int   pivotHighBar = 0
+var int   pivotLowBar  = 0
 if not na(ph)
-    pivotHigh := ph
-    pivotHighBar := bar_index
+    pivotHigh    := ph
+    pivotHighBar := bar_index - FM_PIV_CONFIRM
 if not na(pl)
-    pivotLow := pl
-    pivotLowBar := bar_index
-rangePos = (na(pivotHigh) or na(pivotLow) or pivotHigh <= pivotLow) ? na : f_clip((close - pivotLow) / (pivotHigh - pivotLow), 0.0, 1.0)
+    pivotLow    := pl
+    pivotLowBar := bar_index - FM_PIV_CONFIRM
+float rangePos = na(pivotHigh) or na(pivotLow) or pivotHigh <= pivotLow ? float(na) : f_clip((close - pivotLow) / (pivotHigh - pivotLow), 0.0, 1.0)
 
-// -- Higher timeframe, causally (§4.3) ----------------------------------------
-// BOTH `[1]` and `lookahead_off` are required and neither alone suffices.
-// Without `lookahead_off`, Pine serves the COMPLETED higher-timeframe bar to
-// historical bars that could not have seen it — the classic backtest-only
-// miracle. With `lookahead_off` but no `[1]`, the in-progress higher-timeframe
-// bar still updates intrabar, so a historical signal changes as the bar forms.
-// Together they deliver only fully-closed higher-timeframe bars.
-htfTF  = timeframe.multiplier * FM_HTF_MULT
-htfStr = str.tostring(htfTF) + (timeframe.isintraday ? "" : "D")
-htfSlopeRaw = request.security(syminfo.tickerid, htfStr, slopeT[1], lookahead=barmerge.lookahead_off)
-htfRangeRaw = request.security(syminfo.tickerid, htfStr, rangePos[1], lookahead=barmerge.lookahead_off)
+// -- higher timeframe WITHOUT request.security -------------------------------
+// The previous build passed mutable-variable expressions to request.security
+// (which Pine rejects outright) and built timeframe strings that were invalid
+// on weekly charts. This aggregates FM_HTF_MULT closed chart bars into one HTF
+// bar in-script - the same causal aggregator the Python reference uses - so it
+// behaves identically on every chart resolution and cannot repaint: HTF values
+// update only when an HTF bar COMPLETES and hold constant in between.
+var int   htfCount     = 0
+var float htfHAcc      = na
+var float htfLAcc      = na
+var float htfPrevClose = na
+var float htfEwVar     = na
+var float hkLev = na
+var float hkSlp = 0.0
+var float hkP00 = na
+var float hkP01 = 0.0
+var float hkP11 = na
+var float htfSlopeT   = na
+var float htfRangePos = na
+var float[] htfHighs = array.new_float(0)
+var float[] htfLows  = array.new_float(0)
 
-// -- Sweep and fail (§3.2) ----------------------------------------------------
-// Four conditions, all on closed bars: penetration beyond noise, anomalous
-// participation, the bar giving back its excursion, and a later close that
-// reclaims the level. The fourth is what makes this non-repainting AND late — a
-// sweep is knowable only after it has failed, which is the real information
-// arrival time.
-penLow  = not na(pivotLow)  and low  < pivotLow  and f_safediv(math.log(pivotLow / low), sigmaBp, 0.0) >= FM_SWEEP_MINPEN
-penHigh = not na(pivotHigh) and high > pivotHigh and f_safediv(math.log(high / pivotHigh), sigmaBp, 0.0) >= FM_SWEEP_MINPEN
-heavy   = partRank >= 0.75
-gaveBackLow  = clv > 0 or absRank >= 0.6
-gaveBackHigh = clv < 0 or absRank >= 0.6
-var int   sweepDir = 0
-var int   sweepAge = 999
-var float sweepLvl = na
-var bool  pendingLow = false
-var bool  pendingHigh = false
-var int   pendingAge = 999
-sweepAge := sweepAge + 1
-pendingAge := pendingAge + 1
-if pendingAge > FM_SWEEP_MAXBARS
-    pendingLow := false
-    pendingHigh := false
-if pendingLow and not na(sweepLvl) and close > sweepLvl
-    sweepDir := 1
-    sweepAge := 0
-    pendingLow := false
-if pendingHigh and not na(sweepLvl) and close < sweepLvl
-    sweepDir := -1
-    sweepAge := 0
-    pendingHigh := false
-if penLow and heavy and gaveBackLow
-    pendingLow := true
-    pendingAge := 0
-    sweepLvl := pivotLow
-if penHigh and heavy and gaveBackHigh
-    pendingHigh := true
-    pendingAge := 0
-    sweepLvl := pivotHigh
+htfHAcc := na(htfHAcc) ? high : math.max(htfHAcc, high)
+htfLAcc := na(htfLAcc) ? low  : math.min(htfLAcc, low)
+htfCount += 1
+if htfCount >= FM_HTF_MULT
+    float hC   = close
+    float hRet = na(htfPrevClose) or htfPrevClose <= 0.0 ? float(na) : math.log(hC / htfPrevClose)
+    htfEwVar := na(hRet) ? htfEwVar : na(htfEwVar) ? hRet * hRet : 0.1 * hRet * hRet + 0.9 * htfEwVar
+    float hSig = math.sqrt(math.max(nz(htfEwVar, 1.0e-8), 1.0e-10))
+    float hs2  = hSig * hSig
+    float hLog = f_slog(hC)
+    if na(hkLev)
+        hkLev := hLog
+        hkP00 := 100.0 * hs2
+        hkP11 := hs2
+    else
+        hkLev := hkLev + hkSlp
+        float hp00 = hkP00 + 2.0 * hkP01 + hkP11 + FM_KAL_SNR * hs2
+        float hp01 = hkP01 + hkP11
+        float hp11 = hkP11 + FM_KAL_SNR_SLOPE * hs2
+        float hiv  = hp00 + hs2
+        float hk0  = f_safediv(hp00, hiv, 0.0)
+        float hk1  = f_safediv(hp01, hiv, 0.0)
+        float hres = hLog - hkLev
+        hkLev := hkLev + hk0 * hres
+        hkSlp := hkSlp + hk1 * hres
+        hkP00 := math.max(hp00 - hk0 * hp00, 1.0e-18)
+        hkP01 := hp01 - hk0 * hp01
+        hkP11 := math.max(hp11 - hk1 * hp01, 1.0e-18)
+        htfSlopeT := f_safediv(hkSlp, math.sqrt(hkP11), float(na))
+    array.push(htfHighs, nz(htfHAcc, high))
+    array.push(htfLows,  nz(htfLAcc, low))
+    if array.size(htfHighs) > 20
+        array.shift(htfHighs)
+        array.shift(htfLows)
+    if array.size(htfHighs) >= 5
+        float hHH = array.max(htfHighs)
+        float hLL = array.min(htfLows)
+        htfRangePos := hHH <= hLL ? float(na) : f_clip((hC - hLL) / (hHH - hLL), 0.0, 1.0)
+    htfPrevClose := hC
+    htfCount := 0
+    htfHAcc  := na
+    htfLAcc  := na
 
-featuresValid = bar_index >= FM_WARMUP and not na(volRank) and not na(ladrRank) and not na(sigmaFcst)
+// -- sweep-and-fail (docs/01-THEORY.md 3.2): knowable only AFTER the reclaim --
+var int   sweepDir   = 0
+var int   sweepAge   = 999
+var float sweepLvlLo = na
+var float sweepLvlHi = na
+var int   pendLoAge  = 999
+var int   pendHiAge  = 999
+sweepAge  += 1
+pendLoAge += 1
+pendHiAge += 1
+bool heavy = partRank >= FM_SWEEP_PARTMIN
+if pendLoAge <= FM_SWEEP_MAXBARS and not na(sweepLvlLo) and close > sweepLvlLo
+    sweepDir  := 1
+    sweepAge  := 0
+    pendLoAge := 999
+if pendHiAge <= FM_SWEEP_MAXBARS and not na(sweepLvlHi) and close < sweepLvlHi
+    sweepDir  := -1
+    sweepAge  := 0
+    pendHiAge := 999
+if heavy and not na(pivotLow) and low < pivotLow and f_safediv(f_slog(pivotLow / math.max(low, 1.0e-12)), sigmaBp, 0.0) >= FM_SWEEP_MINPEN and (clv > 0.0 or absRank >= 0.6)
+    pendLoAge  := 0
+    sweepLvlLo := pivotLow
+if heavy and not na(pivotHigh) and high > pivotHigh and f_safediv(f_slog(high / pivotHigh), sigmaBp, 0.0) >= FM_SWEEP_MINPEN and (clv < 0.0 or absRank >= 0.6)
+    pendHiAge  := 0
+    sweepLvlHi := pivotHigh
 
-// ============================================================================
-// L2a  Regime posterior — parameter-free measurement model (§5)
-// ============================================================================
-// Each regime is a fixed product of Beta densities over rank features. Beta(1,1)
-// is exactly uniform and encodes "this regime makes no claim about this
-// feature", contributing a likelihood factor of exactly 1. Zero parameters here
-// were fitted to returns.
-f_betaLogPdf(x, a, b) =>
-    xx = f_clip(x, 1e-6, 1.0 - 1e-6)
-    (a - 1.0) * math.log(xx) + (b - 1.0) * math.log(1.0 - xx)
+bool featuresValid = bar_index >= WARMUP_BARS and modelOk
 
-var float[] logAlpha = array.new<float>(4, -math.log(4))
-var float[] refPost  = array.new<float>(4, 1.0 / 4)
-var float[] posterior = array.new<float>(4, 1.0 / 4)
-
-featArr = array.from(volRank, vrRank, ladrRank, absRank, partRank, permEntropy, jumpShare, efficiency)
-
-float hazard = 1.0
+// ════════════════════════════════════════════════════════════════════════════
+// L2a - REGIME POSTERIOR (docs/01-THEORY.md 5)
+// Forward recursion only; the smoother would repaint every historical label.
+// Zero parameters fitted to returns: Beta(1,1) is exactly uniform, so "this
+// regime makes no claim about this feature" lives inside the same family and
+// contributes a likelihood factor of exactly 1.
+// ════════════════════════════════════════════════════════════════════════════
+var float[] logAlpha  = array.new_float(4, -1.3862943611198906)
+var float[] refPost   = array.new_float(4, 0.25)
+var float[] posterior = array.new_float(4, 0.25)
+float hazard    = 1.0
 int   domRegime = 3
+float refAlpha  = f_ewmaAlpha(FM_RG_HAZ_HL)
+
 if featuresValid
-    // Measurement log-likelihood per regime, tempered by the frozen exponent.
-    logLik = array.new<float>(4, 0.0)
-    for k = 0 to 4 - 1
-        float s = 0.0
-        for j = 0 to 7
-            v = array.get(featArr, j)
-            if not na(v)
-                // The log-normalizer term is NOT optional. Omitting it (an
-                // earlier version did) adds a different constant to each
-                // regime's log-likelihood every bar -- the rows differ by up
-                // to 4.2 log units, a permanent e^4 tilt toward the regimes
-                // with the most concentrated claims, regardless of the data.
-                // Beta(1,1) rows contribute 0 in both terms, preserving the
-                // "no claim" encoding.
-                // FM_RG_LOGNORM holds ln B(a,b) -- the value the reference
-                // implementation SUBTRACTS. Adding it (the audit's own first
-                // attempt) inverts the correction and doubles the damage. The
-                // sign is locked by test_regressions.py against the Python
-                // beta_logpdf at sample points.
-                s += f_betaLogPdf(v, array.get(DESIGN_A, k * 8 + j), array.get(DESIGN_B, k * 8 + j)) - array.get(DESIGN_LOGN, k * 8 + j)
-        array.set(logLik, k, FM_RG_TEMPER * s)
+    float[] feat = array.new_float(0)
+    array.push(feat, volRank)
+    array.push(feat, vrRank)
+    array.push(feat, ladrRank)
+    array.push(feat, absRank)
+    array.push(feat, partRank)
+    array.push(feat, permEntropy)
+    array.push(feat, jumpShare)
+    array.push(feat, efficiency)
+    int usable = 0
+    for j = 0 to NFEAT - 1
+        if not na(array.get(feat, j))
+            usable += 1
+    if usable >= FM_RG_MIN_FEAT
+        float[] logLik = array.new_float(4, 0.0)
+        for k = 0 to NREG - 1
+            float acc = 0.0
+            for j = 0 to NFEAT - 1
+                float v = array.get(feat, j)
+                if not na(v)
+                    acc += f_betaLogPdf(v, array.get(DESIGN_A, k * NFEAT + j), array.get(DESIGN_B, k * NFEAT + j)) - array.get(DESIGN_LOGN, k * NFEAT + j)
+            array.set(logLik, k, FM_RG_TEMPER * acc)
+        float[] newLog = array.new_float(4, 0.0)
+        for k = 0 to NREG - 1
+            float mx = -1.0e18
+            for j = 0 to NREG - 1
+                mx := math.max(mx, array.get(logAlpha, j) + (j == k ? FM_RG_LOG_STAY : FM_RG_LOG_SWITCH))
+            float sacc = 0.0
+            for j = 0 to NREG - 1
+                sacc += math.exp(array.get(logAlpha, j) + (j == k ? FM_RG_LOG_STAY : FM_RG_LOG_SWITCH) - mx)
+            array.set(newLog, k, mx + math.log(math.max(sacc, 1.0e-300)) + array.get(logLik, k))
+        float mx2 = -1.0e18
+        for k = 0 to NREG - 1
+            mx2 := math.max(mx2, array.get(newLog, k))
+        float tot = 0.0
+        for k = 0 to NREG - 1
+            tot += math.exp(array.get(newLog, k) - mx2)
+        float lnorm = mx2 + math.log(math.max(tot, 1.0e-300))
+        float drift = 0.0
+        float maxP  = 0.0
+        for k = 0 to NREG - 1
+            array.set(logAlpha, k, array.get(newLog, k) - lnorm)
+            float pk = math.exp(array.get(logAlpha, k))
+            array.set(posterior, k, pk)
+            float rk = (1.0 - refAlpha) * array.get(refPost, k) + refAlpha * pk
+            array.set(refPost, k, rk)
+            drift += math.abs(pk - rk)
+            if pk > maxP
+                maxP := pk
+                domRegime := k
+        // Either a posterior in motion or one that never committed is reason
+        // enough to stand aside; the max is the conservative reading.
+        hazard := math.max(0.5 * drift, 1.0 - maxP)
 
-    // Sticky forward recursion in log space. FORWARD ONLY — the forward-backward
-    // posterior would repaint every historical regime label the moment a new bar
-    // arrived.
-    logStay   = FM_RG_LOG_STAY
-    logSwitch = FM_RG_LOG_SWITCH
-    newLog = array.new<float>(4, 0.0)
-    for k = 0 to 4 - 1
-        float mx = -1e18
-        for j = 0 to 4 - 1
-            v = array.get(logAlpha, j) + (j == k ? logStay : logSwitch)
-            mx := math.max(mx, v)
-        float acc = 0.0
-        for j = 0 to 4 - 1
-            v = array.get(logAlpha, j) + (j == k ? logStay : logSwitch)
-            acc += math.exp(v - mx)
-        array.set(newLog, k, mx + math.log(acc) + array.get(logLik, k))
-    float mx2 = -1e18
-    for k = 0 to 4 - 1
-        mx2 := math.max(mx2, array.get(newLog, k))
-    float tot = 0.0
-    for k = 0 to 4 - 1
-        tot += math.exp(array.get(newLog, k) - mx2)
-    lnorm = mx2 + math.log(tot)
-    for k = 0 to 4 - 1
-        array.set(logAlpha, k, array.get(newLog, k) - lnorm)
-        array.set(posterior, k, math.exp(array.get(logAlpha, k)))
+float pTrend  = array.get(posterior, 0)
+float pRevert = array.get(posterior, 1)
+float pStress = array.get(posterior, 2)
+float pQuiet  = array.get(posterior, 3)
+float regimeCommit = math.max(math.max(pTrend, pRevert), math.max(pStress, pQuiet))
 
-    // Transition hazard (§5.5): max of posterior drift and ambiguity. Either
-    // alone is reason enough to stand aside, which is the conservative reading.
-    aRef = 2.0 / (FM_RG_HAZ_HL + 1.0)
-    float tv = 0.0
-    float maxP = 0.0
-    for k = 0 to 4 - 1
-        pk = array.get(posterior, k)
-        rk = (1 - aRef) * array.get(refPost, k) + aRef * pk
-        array.set(refPost, k, rk)
-        tv += math.abs(pk - rk)
-        if pk > maxP
-            maxP := pk
-            domRegime := k
-    hazard := math.max(0.5 * tv, 1.0 - maxP)
+// ════════════════════════════════════════════════════════════════════════════
+// L2b - ENGINE SCORES (identical in both modes; docs/03-ENGINES.md)
+// Each engine emits a score in [-1, 1] and a reliability in [0, 1]. The
+// reliability is what the pooling weights, and it is where regime conditioning
+// bites: a mean-reversion engine is not merely wrong in a trending regime, it
+// is unreliable, and those are different things.
+// ════════════════════════════════════════════════════════════════════════════
+float regScore = f_clip(0.5 * (pTrend * math.tanh(nz(slopeT, 0.0) / 2.0) + pRevert * (0.5 - nz(rangePos, 0.5)) * 2.0), -1.0, 1.0)
+float regRel   = f_clip(regimeCommit * (1.0 - hazard), 0.0, 1.0)
 
-pTrend  = array.get(posterior, 0)
-pRevert = array.get(posterior, 1)
-pStress = array.get(posterior, 2)
-pQuiet  = array.get(posterior, 3)
+float trAgree = (close > nz(close[5], close) ? 1.0 : -1.0) + (close > nz(close[22], close) ? 1.0 : -1.0) + (close > nz(close[66], close) ? 1.0 : -1.0)
+float trScore = f_clip(0.45 * math.tanh(nz(slopeT, 0.0) / 2.0) + 0.25 * trAgree / 3.0 + 0.30 * math.tanh(nz(htfSlopeT, 0.0) / 2.0), -1.0, 1.0)
+float persist = f_clip(0.5 + nz(vrZ, 0.0) / 4.0, 0.0, 1.0)
+bool  tfAgreeOk = na(htfSlopeT) or na(slopeT) or (htfSlopeT >= 0.0) == (slopeT >= 0.0)
+float trRel   = f_clip((0.25 + 0.75 * pTrend) * (0.15 + 0.85 * persist) * (0.45 + 0.55 * efficiency) * (tfAgreeOk ? 1.0 : 0.45) * (1.0 - 0.6 * pRevert), 0.0, 1.0)
 
-// ============================================================================
-// L2b  Engines (docs/03-ENGINES.md)
-// ============================================================================
-// Each returns [score, reliability]. `score` is direction and strength;
-// `reliability` is "should you listen to me right now". They must never be
-// merged: a steep trend in a mean-reverting regime is not a WEAK buy signal, it
-// is a strong signal that should not be acted on, and encoding that as a small
-// score would let several such engines sum into a large one.
+float moStrength = math.max(0.0, 2.0 * ladrRank - 1.0)
+float moDir      = ladr > 0.0 ? 1.0 : ladr < 0.0 ? -1.0 : 0.0
+float moScore    = f_clip(0.625 * moDir * moStrength + 0.25 * f_clip(clvEma, -1.0, 1.0), -1.0, 1.0)
+float moRel      = f_clip((0.20 + 0.80 * moStrength) * (0.35 + 0.65 * pTrend) * (1.0 - 0.5 * pRevert) * (1.0 - 0.7 * pQuiet) * f_clip(1.0 - 0.5 * jumpShare, 0.4, 1.0), 0.0, 1.0)
 
-// -- Regime engine: routes, barely directs.
-regScore = f_clip(0.5 * (pTrend * math.tanh(nz(slopeT, 0.0) / 2.0) + pRevert * (0.5 - nz(rangePos, 0.5)) * 2.0), -1, 1)
-regRel   = f_clip((1.0 - (1.0 - math.max(math.max(pTrend, pRevert), math.max(pStress, pQuiet)))) * (1.0 - hazard), 0, 1)
+float sweepScore = sweepAge <= 4 and sweepDir != 0 ? float(sweepDir) * 0.6 * (1.0 - float(sweepAge) / 5.0) : 0.0
+float edgeDist   = na(rangePos) ? 0.0 : math.abs(rangePos - 0.5) * 2.0
+bool  absorbing  = hasVolume and absRank > 0.65 and edgeDist > 0.5
+float absorbSc   = absorbing ? -f_clip((absRank - 0.65) / 0.35 * edgeDist, 0.0, 1.0) * (nz(rangePos, 0.5) > 0.5 ? 1.0 : -1.0) : 0.0
+float liqScore   = sweepScore != 0.0 and absorbSc != 0.0 ? 0.7 * sweepScore + 0.3 * absorbSc : sweepScore + absorbSc
+bool  liqEvent   = sweepScore != 0.0 or absorbing
+float liqRel     = liqEvent ? f_clip((0.30 + 0.70 * math.abs(liqScore)) * (0.40 + 0.60 * (pRevert + 0.6 * pStress)) * (1.0 - 0.35 * pTrend), 0.0, 1.0) : hasVolume ? 0.35 : 0.10
 
-// -- Trend engine.
-trAgree = (close > close[5] ? 1 : -1) + (close > close[22] ? 1 : -1) + (close > close[66] ? 1 : -1)
-trScore = f_clip(0.45 * math.tanh(nz(slopeT, 0.0) / 2.0) + 0.25 * (trAgree / 3.0) + 0.30 * math.tanh(nz(htfSlopeRaw, 0.0) / 2.0), -1, 1)
-persist = f_clip(0.5 + nz(vrZ, 0.0) / 4.0, 0, 1)
-tfAgree = (na(htfSlopeRaw) or na(slopeT)) ? 1.0 : ((htfSlopeRaw >= 0) == (slopeT >= 0) ? 1.0 : 0.45)
-trRel   = f_clip((0.25 + 0.75 * pTrend) * (0.15 + 0.85 * persist) * (0.45 + 0.55 * nz(efficiency, 0.3)) * tfAgree * (1.0 - 0.6 * pRevert), 0, 1)
+float volFav   = volRank >= 0.25 and volRank <= 0.80 ? 1.0 : f_clip(1.0 - 2.0 * (volRank < 0.25 ? (0.25 - volRank) / 0.55 : (volRank - 0.80) / 0.55), -1.0, 1.0)
+float volScore = volRatio > 1.15 and math.abs(dNorm) > 0.5 ? f_clip(0.35 * math.tanh(dNorm / 2.0), -0.4, 0.4) : 0.0
+float volRel   = f_clip((0.35 + 0.45 * f_clip((volFav + 1.0) / 2.0, 0.0, 1.0)) * (1.0 - 0.4 * pStress), 0.0, 1.0)
 
-// -- Momentum engine: displacement that was cheap in liquidity terms.
-// Only the upper half of the LADR distribution is evidence. A bar at the median
-// cost of displacement says nothing and maps to zero, not to a weak opinion.
-moStrength = math.max(0.0, 2.0 * nz(ladrRank, 0.5) - 1.0)
-moDir      = na(ladr) ? 0.0 : (ladr > 0 ? 1.0 : (ladr < 0 ? -1.0 : 0.0))
-moScore    = f_clip(0.625 * moDir * moStrength + 0.25 * f_clip(nz(clvEma, 0.0), -1, 1), -1, 1)
-jumpPen    = f_clip(1.0 - 0.5 * nz(jumpShare, 0.0), 0.4, 1.0)
-moRel      = f_clip((0.20 + 0.80 * moStrength) * (0.35 + 0.65 * pTrend) * (1.0 - 0.5 * pRevert) * (1.0 - 0.7 * pQuiet) * jumpPen, 0, 1)
+float stPos    = na(rangePos) ? 0.0 : 2.0 * rangePos - 1.0
+float wT       = pTrend + 1.0e-9
+float wR       = pRevert + 1.0e-9
+float stScore0 = (wT * stPos + wR * -stPos) / (wT + wR)
+float stScore  = na(htfRangePos) ? stScore0 : f_clip(0.7 * stScore0 + 0.3 * (wT - wR) * (2.0 * htfRangePos - 1.0) / (wT + wR), -1.0, 1.0)
+float stDecis  = f_safediv(math.abs(pTrend - pRevert), pTrend + pRevert, 0.0)
+float stAgeMax = float(math.max(bar_index - pivotHighBar, bar_index - pivotLowBar))
+float stStale  = f_clip(1.0 - (stAgeMax - 20.0) / 120.0, 0.25, 1.0)
+float stRel    = na(rangePos) ? 0.0 : f_clip((0.25 + 0.75 * math.abs(stPos)) * (0.35 + 0.65 * stDecis) * stStale, 0.0, 1.0)
 
-// -- Liquidity engine: sweeps that fail, and volume that goes nowhere.
-sweepScore = (sweepAge <= 4 and sweepDir != 0) ? sweepDir * 0.6 * (1.0 - sweepAge / 5.0) : 0.0
-edgeDist   = na(rangePos) ? 0.0 : math.abs(rangePos - 0.5) * 2.0
-absorbing  = nz(absRank, 0.0) > 0.65 and edgeDist > 0.5
-absorbScore = absorbing ? -f_clip((nz(absRank, 0.0) - 0.65) / 0.35 * edgeDist, 0, 1) * (rangePos > 0.5 ? 1 : -1) : 0.0
-liqScore   = (sweepScore != 0 and absorbScore != 0) ? 0.7 * sweepScore + 0.3 * absorbScore : sweepScore + absorbScore
-liqHasEvidence = sweepScore != 0 or absorbing
-// No liquidity event is a CONFIDENT statement of no evidence, not an absence of
-// opinion: it contributes nothing to the pooled log-odds while adding to its
-// variance, which correctly widens the interval.
-liqRel     = liqHasEvidence ? f_clip((0.30 + 0.70 * math.abs(liqScore)) * (0.40 + 0.60 * (pRevert + 0.6 * pStress)) * (1.0 - 0.35 * pTrend), 0, 1) : 0.35
+// The behavioural engine's live inputs - dealer gamma, positioning surveys -
+// are not available inside TradingView. It is kept so the engine indices match
+// the exported precision matrix, and it abstains: a score of 0 contributes
+// exactly zero evidence while the matrix stays conformable.
+float bhScore = 0.0
+float bhRel   = 0.9
 
-// -- Volatility engine: usually zero score with confident reliability.
-// Volatility is the most forecastable quantity available and is almost entirely
-// directionless. A compression that resolves into an expansion has, ex ante, no
-// reliable direction; assigning one manufactures a signal from a real observation.
-volFav = (volRank >= 0.25 and volRank <= 0.80) ? 1.0 : f_clip(1.0 - 2.0 * (volRank < 0.25 ? (0.25 - volRank) / 0.55 : (volRank - 0.80) / 0.55), -1, 1)
-volScore = (volRatio > 1.15 and math.abs(nz(dNorm, 0.0)) > 0.5) ? f_clip(0.35 * math.tanh(nz(dNorm, 0.0) / 2.0), -0.4, 0.4) : 0.0
-volRel   = f_clip((0.35 + 0.45 * f_clip((volFav + 1.0) / 2.0, 0, 1)) * (1.0 - 0.4 * pStress), 0, 1)
+// ════════════════════════════════════════════════════════════════════════════
+// L3 - CALOP FUSION (docs/01-THEORY.md 6)
+// Summing log-odds - which is what every "confluence score" implicitly does -
+// is correct Bayes only under conditional independence. Seven engines built on
+// overlapping windows of one price series are nowhere near independent, so the
+// pooling uses the exported precision matrix:
+//     L = 1' M l,   EBE = 1' M 1,   M = D^0.5 C^-1 D^0.5
+// ════════════════════════════════════════════════════════════════════════════
+f_evidence(float s) =>
+    float x = f_clip(s, -FM_FUSE_CLAMP, FM_FUSE_CLAMP)
+    math.log((1.0 + x) / (1.0 - x))
 
-// -- Structure engine: the same location is bullish in one regime and bearish in
-// the other, so both readings are computed and weighted by the posterior.
-stPos   = na(rangePos) ? 0.0 : 2.0 * rangePos - 1.0
-wT = pTrend + 1e-9
-wR = pRevert + 1e-9
-stScore0 = (wT * stPos + wR * (-stPos)) / (wT + wR)
-stScore  = na(htfRangeRaw) ? stScore0 : 0.7 * stScore0 + 0.3 * f_clip((wT * (2 * htfRangeRaw - 1) - wR * (2 * htfRangeRaw - 1)) / (wT + wR), -1, 1)
-stDecis  = math.abs(pTrend - pRevert) / math.max(pTrend + pRevert, 1e-9)
-stStale  = f_clip(1.0 - (math.max(nz(bar_index - pivotHighBar, 0), nz(bar_index - pivotLowBar, 0)) - 20.0) / 120.0, 0.25, 1.0)
-stRel    = na(rangePos) ? 0.0 : f_clip((0.25 + 0.75 * math.abs(stPos)) * (0.35 + 0.65 * stDecis) * stStale, 0, 1)
+var float[] scoreArr = array.new_float(7, 0.0)
+var float[] relArr   = array.new_float(7, 0.0)
+array.set(scoreArr, 0, regScore)
+array.set(scoreArr, 1, trScore)
+array.set(scoreArr, 2, moScore)
+array.set(scoreArr, 3, liqScore)
+array.set(scoreArr, 4, volScore)
+array.set(scoreArr, 5, stScore)
+array.set(scoreArr, 6, bhScore)
+array.set(relArr, 0, regRel)
+array.set(relArr, 1, trRel)
+array.set(relArr, 2, moRel)
+array.set(relArr, 3, liqRel)
+array.set(relArr, 4, volRel)
+array.set(relArr, 5, stRel)
+array.set(relArr, 6, bhRel)
 
-// -- Behavioral engine: mostly a statement about when NOT to act.
-// What survives replication in the calendar literature is the volume and
-// volatility structure, not the directional content.
-inSession = not na(close)
-sessionTrust = timeframe.isintraday ? (session.ismarket ? 0.95 : 0.25) : 1.0
-bhScore = 0.0
-bhRel   = f_clip(sessionTrust, 0, 1)
-
-// ============================================================================
-// L3  CALOP fusion (§6)
-// ============================================================================
-// Naive log-odds summation — which is what any "confluence score" implicitly
-// does — is the correct Bayesian operation ONLY under conditional independence.
-// Ten engines built on overlapping windows of one price series are nowhere near
-// independent, and the error is the difference between 75% and 99.998%.
-//
-//   L = 1' M e,  EBE = 1' M 1,  M = D^(1/2) C^-1 D^(1/2),  Var(L) = sd^2 * EBE
-//
-// C^-1 is frozen (it changes slowly); the reliability scaling D is live.
-scoreArr = array.from(regScore, trScore, moScore, liqScore, volScore, stScore, bhScore)
-relArr   = array.from(regRel,   trRel,   moRel,   liqRel,   volRel,   stRel,   bhRel)
-
-f_evidence(s) =>
-    x = f_clip(s, -FM_FUSE_CLAMP, FM_FUSE_CLAMP)
-    math.log((1.0 + x) / (1.0 - x))   // = 2*atanh(x), the inverse of the tanh the engines apply
-
-float logOdds = 0.0
+float logOdds  = 0.0
 float ebeTotal = 0.0
-if featuresValid
-    for i = 0 to FM_ENG_M - 1
-        di = math.sqrt(math.max(array.get(relArr, i), 0.0))
-        for j = 0 to FM_ENG_M - 1
-            dj = math.sqrt(math.max(array.get(relArr, j), 0.0))
-            pij = array.get(PRECISION, i * FM_ENG_M + j)
+if featuresValid and fusionOk
+    for i = 0 to NENG - 1
+        float di = math.sqrt(math.max(array.get(relArr, i), 0.0))
+        for j = 0 to NENG - 1
+            float dj  = math.sqrt(math.max(array.get(relArr, j), 0.0))
+            float pij = array.get(PRECISION, i * NENG + j)
             logOdds  += di * pij * dj * f_evidence(array.get(scoreArr, j))
             ebeTotal += di * pij * dj
 
-direction = logOdds > 0 ? 1 : (logOdds < 0 ? -1 : 0)
+int direction = logOdds > 0.0 ? 1 : logOdds < 0.0 ? -1 : 0
 
-// Aligned breadth: how many independent engines actually support the pooled
-// direction. Total breadth includes confident abstainers, which rightly widen
-// the interval but must not satisfy a threshold about agreement.
+// Aligned breadth: how many *independent* opinions actually point this way.
+// Seven mildly bullish but duplicated engines must not read as seven.
 float ebeAligned = 0.0
-if featuresValid and direction != 0
-    for i = 0 to FM_ENG_M - 1
-        si = array.get(scoreArr, i)
-        ri = array.get(relArr, i)
-        okI = ri > 0 and math.abs(si) * ri > FM_FUSE_ALIGNEPS and (si > 0 ? 1 : -1) == direction
-        if okI
-            di = math.sqrt(ri)
-            for j = 0 to FM_ENG_M - 1
-                sj = array.get(scoreArr, j)
-                rj = array.get(relArr, j)
-                okJ = rj > 0 and math.abs(sj) * rj > FM_FUSE_ALIGNEPS and (sj > 0 ? 1 : -1) == direction
-                if okJ
-                    ebeAligned += di * array.get(PRECISION, i * FM_ENG_M + j) * math.sqrt(rj)
+if featuresValid and fusionOk and direction != 0
+    for i = 0 to NENG - 1
+        float si = array.get(scoreArr, i)
+        float ri = array.get(relArr, i)
+        if ri > 0.0 and math.abs(si) * ri > FM_FUSE_ALIGNEPS and (si > 0.0 ? 1 : -1) == direction
+            float di = math.sqrt(ri)
+            for j = 0 to NENG - 1
+                float sj = array.get(scoreArr, j)
+                float rj = array.get(relArr, j)
+                if rj > 0.0 and math.abs(sj) * rj > FM_FUSE_ALIGNEPS and (sj > 0.0 ? 1 : -1) == direction
+                    ebeAligned += di * array.get(PRECISION, i * NENG + j) * math.sqrt(rj)
 
-// MacKay's probit approximation to the Gaussian-integrated logistic. This is the
-// mechanism that pulls stated confidence toward 50% when evidence is narrow, and
-// it means a reported 97% requires evidence that is both strong AND broad.
-varL  = FM_FUSE_SD * FM_FUSE_SD * math.max(ebeTotal, 1e-9)
-kappa = 1.0 / math.sqrt(1.0 + 0.39269908169872414 * FM_FUSE_T * FM_FUSE_T * varL)
-pUpRaw = f_logistic((FM_FUSE_T * logOdds + FM_FUSE_B) * kappa)
-seL    = math.sqrt(varL)
-pLoRaw = f_logistic((FM_FUSE_T * (logOdds - FM_FUSE_Z * seL) + FM_FUSE_B) * kappa)
-pHiRaw = f_logistic((FM_FUSE_T * (logOdds + FM_FUSE_Z * seL) + FM_FUSE_B) * kappa)
-pUp = FM_ISO_ON ? f_interp(pUpRaw, ISO_X, ISO_Y) : pUpRaw
-pLo = FM_ISO_ON ? f_interp(pLoRaw, ISO_X, ISO_Y) : pLoRaw
-pHi = FM_ISO_ON ? f_interp(pHiRaw, ISO_X, ISO_Y) : pHiRaw
-// Probabilities are always stated FOR THE PROPOSED DIRECTION.
-pSuccess = direction >= 0 ? pUp : 1.0 - pUp
-pLow     = direction >= 0 ? pLo : 1.0 - pHi
-pHigh    = direction >= 0 ? pHi : 1.0 - pLo
+// MacKay probit correction: confidence shrinks toward 50% when the evidence is
+// narrow. A reported 90% has to be both strong AND broad.
+float varL   = FM_FUSE_SD * FM_FUSE_SD * math.max(ebeTotal, 1.0e-9)
+float kap    = 1.0 / math.sqrt(1.0 + 0.39269908169872414 * FM_FUSE_T * FM_FUSE_T * varL)
+float pUpRaw = f_logistic((FM_FUSE_T * logOdds + FM_FUSE_B) * kap)
+float pUp    = FM_ISO_ON and array.size(ISO_X) >= 2 ? f_interp(pUpRaw, ISO_X, ISO_Y) : pUpRaw
+float pSuccess = direction >= 0 ? pUp : 1.0 - pUp
 
-// ============================================================================
-// L4  Edge Book lookup (§7)
-// ============================================================================
-// Setup family, most specific first: a bar that is both a sweep and a
-// continuation is judged as a sweep.
-setupIdx = (sweepAge <= 4 and sweepDir != 0) ? 1 : (compression > 0.7 and volRatio > 1.1 ? 2 : (pRevert > pTrend ? 3 : 0))
-absL = math.abs(logOdds)
-int bucketIdx = 0
+// ════════════════════════════════════════════════════════════════════════════
+// MODE A GATE - the frozen Edge Book's lower credible bound, minus costs.
+// Selectivity here is a CONSEQUENCE of the rule, not a threshold anyone chose,
+// and it is not relaxed to make the chart look busier.
+// ════════════════════════════════════════════════════════════════════════════
+// setups: 0 continuation, 1 sweep_reversal, 2 compression_break, 3 range_fade
+int   setupIdx = sweepAge <= 4 and sweepDir != 0 ? 1 : compression > 0.7 and volRatio > 1.1 ? 2 : pRevert > pTrend ? 3 : 0
+float absL = math.abs(logOdds)
+int   bucketIdx = 0
 for k = 0 to array.size(BUCKET_EDGE) - 1
     if absL >= array.get(BUCKET_EDGE, k)
         bucketIdx += 1
 bucketIdx := math.min(bucketIdx, FM_EB_NBUCKET - 1)
-cellIdx = (domRegime * FM_EB_NSETUP + setupIdx) * FM_EB_NBUCKET + bucketIdx
+int  cellIdx = (domRegime * FM_EB_NSETUP + setupIdx) * FM_EB_NBUCKET + bucketIdx
+bool cellOk  = bookOk and cellIdx >= 0 and cellIdx < array.size(EDGE_MU)
+float edgeMu   = cellOk ? array.get(EDGE_MU, cellIdx) : 0.0
+float edgeScl  = cellOk ? math.max(array.get(EDGE_SCALE, cellIdx), 1.0e-6) : 0.25
+float edgeDof  = cellOk ? math.max(array.get(EDGE_DOF, cellIdx), 2.1) : 6.0
+float edgeNeff = cellOk ? array.get(EDGE_NEFF, cellIdx) : 0.0
+float edgeLcb  = edgeMu + f_studentTPpf(FM_EB_Q, edgeDof) * edgeScl
 
-hasEdge  = array.size(EDGE_MU) > cellIdx
-edgeMu   = hasEdge ? array.get(EDGE_MU, cellIdx) : 0.0
-edgeScl  = hasEdge ? array.get(EDGE_SCALE, cellIdx) : 0.2
-edgeDof  = hasEdge ? array.get(EDGE_DOF, cellIdx) : 6.0
-edgeNeff = hasEdge ? array.get(EDGE_NEFF, cellIdx) : 0.0
-edgeLcb  = edgeMu + f_studentTPpf(FM_EB_Q, edgeDof) * edgeScl
+// Costs in units of forecast volatility - the same denominator as the edge.
+// A round trip that costs more than the edge is the ordinary case, which is
+// why abstention is the primary output rather than a defensive afterthought.
+float kStress   = 1.0 + 1.5 * pStress
+float spreadRel = FM_COST_SFALL
+float halfSpSig = math.min(f_safediv(0.5 * spreadRel, sigmaFcst, 1.0e9), 1.0e9)
+if halfSpSig > FM_COST_MAXHS
+    halfSpSig := 1.0e9
+float roundTrip = 2.0 * (kStress * halfSpSig + kStress * FM_COST_ETA * math.pow(FM_COST_Q, FM_PSI) + kStress * FM_COST_PHI * math.min(rangeSigma, 5.0) + f_safediv(FM_COST_FEE_BPS * 1.0e-4, sigmaFcst, 0.0))
+float evLcbNet = edgeLcb - roundTrip
 
-// ============================================================================
-// L5  Costs, barriers, gate (§7, §8)
-// ============================================================================
-kStress   = 1.0 + 1.5 * pStress
-halfSpSig = f_safediv(0.5 * spreadRel, sigmaFcst, 1e9)
-halfSpSig := halfSpSig > FM_COST_MAXHS ? 1e9 : halfSpSig   // untradeable, not merely expensive
-impactSig = FM_COST_ETA * math.sqrt(FM_COST_Q)
-slipSig   = FM_COST_PHI * math.min(rangeSigma, 5.0)
-feeSig    = f_safediv(FM_COST_FEE_BPS * 1e-4, sigmaFcst, 0.0)
-roundTrip = 2.0 * (kStress * halfSpSig + kStress * impactSig + kStress * slipSig + feeSig)
+// ════════════════════════════════════════════════════════════════════════════
+// MODE B GATE - practical observation: same engines, reliability-weighted,
+// with adjustable strictness. No claim of validation attaches to this.
+// ════════════════════════════════════════════════════════════════════════════
+float bScoreMin = strictIn == 1 ? 0.25 : strictIn == 2 ? 0.35 : strictIn == 3 ? 0.45 : strictIn == 4 ? 0.55 : 0.65
+float bQuietMax = strictIn <= 2 ? 0.70 : strictIn == 3 ? 0.60 : 0.50
+float bHazMax   = strictIn <= 2 ? 0.55 : strictIn == 3 ? 0.45 : 0.40
+float bBreadth  = strictIn <= 2 ? 0.60 : strictIn == 3 ? 0.90 : 1.20
+float wSum   = regRel + trRel + moRel + liqRel + volRel + stRel + 1.0e-9
+float bScore = f_clip((regRel * regScore + trRel * trScore + moRel * moScore + liqRel * liqScore + volRel * volScore + stRel * stScore) / wSum * 2.0, -1.0, 1.0)
+int   bDir   = bScore > 0.0 ? 1 : bScore < 0.0 ? -1 : 0
+float bConf  = 50.0 + 45.0 * math.abs(bScore) * regimeCommit
 
-evMean = edgeMu - roundTrip
-evLcb  = edgeLcb - roundTrip
+// ==== END SHARED CORE ====
 
-// Barriers in sigma first, price second — that is what lets one parameter set
-// serve an instrument at 4 and one at 40,000.
-stopSig = FM_STOP_SIGMA * (pStress > 0.2 ? 1.0 + 0.6 * pStress : 1.0) * (jumpShare > 0.4 ? 1.0 + 0.4 * (jumpShare - 0.4) / 0.6 : 1.0)
-tgtSig  = FM_TGT_SIGMA * (pRevert > pTrend ? 1.0 - 0.25 * (pRevert - pTrend) : 1.0 + 0.20 * (pTrend - pRevert))
-stopSig := f_clip(stopSig, 0.4, 8.0)
-tgtSig  := f_clip(tgtSig, 0.4, 12.0)
+// ════════════════════════════════════════════════════════════════════════════
+// POSITION STATE MACHINE
+// One position at a time. Every mutation is gated on barstate.isconfirmed, so
+// nothing flickers intrabar and nothing already printed is ever revised.
+// ════════════════════════════════════════════════════════════════════════════
+var int   posState    = 0
+var float entryPx     = na
+var float stopPx      = na
+var float targetPx    = na
+var int   barsHeld    = 0
+var int   lastExitBar = -99999
+var int[] entryBars   = array.new_int(0)
 
-// -- Position state machine ---------------------------------------------------
-var int   posState  = 0        // -1 short, 0 flat, +1 long
-var float entryPx   = na
-var float stopPx    = na
-var float targetPx  = na
-var int   barsHeld  = 0
-var int   entryBar  = na
-var int[] recentEntries = array.new<int>(0)
+bool confirmed = barstate.isconfirmed
+bool inSession = not useSession or not timeframe.isintraday or not na(time(timeframe.period, sessIn))
 
-if posState != 0
+int posBefore = posState
+if confirmed and posState != 0
     barsHeld += 1
 
-// Resting stop and target fill intrabar. Pessimistic tie-breaks: if the range
-// spans both barriers the STOP is taken, and a gap through the stop fills at the
-// open. Bar data cannot resolve intrabar sequence, so the ambiguity is always
-// resolved against us — the optimistic convention can manufacture most of a
-// strategy's apparent edge, invisibly.
-bool exitedByBarrier = false
-if posState == 1
+// -- resting barriers, evaluated on the confirmed bar's range -----------------
+// Pessimistic tie-break: the stop wins a same-bar tie, and a gap through the
+// stop is treated as filled at the (worse) open. Bar data cannot resolve
+// intrabar sequence, so the ambiguity is always resolved against us.
+bool exitStop   = false
+bool exitTarget = false
+if confirmed and posState == 1 and not na(stopPx)
     if low <= stopPx
-        exitedByBarrier := true
+        exitStop := true
     else if high >= targetPx
-        exitedByBarrier := true
-else if posState == -1
+        exitTarget := true
+if confirmed and posState == -1 and not na(stopPx)
     if high >= stopPx
-        exitedByBarrier := true
+        exitStop := true
     else if low <= targetPx
-        exitedByBarrier := true
-if exitedByBarrier
-    posState := 0
+        exitTarget := true
+
+// -- discretionary exits decided at the close --------------------------------
+int  propDir0 = isModeA ? direction : bDir
+bool timeExit = confirmed and posState != 0 and not exitStop and not exitTarget and barsHeld >= FM_MAX_HOLD
+bool revExit  = confirmed and posState != 0 and not exitStop and not exitTarget and not timeExit and barsHeld >= FM_MIN_HOLD and propDir0 == -posState and (isModeA ? pSuccess >= FM_GATE_PEXIT : math.abs(bScore) >= bScoreMin * 0.6)
+
+bool   exitNow = exitStop or exitTarget or timeExit or revExit
+string exitWhy = exitStop ? "stop hit" : exitTarget ? "target hit" : timeExit ? "time exit at " + str.tostring(FM_MAX_HOLD) + " bars" : revExit ? "reversal signal" : ""
+float  exitPx  = exitStop ? (posBefore == 1 ? math.min(open, stopPx) : math.max(open, stopPx)) : exitTarget ? targetPx : close
+
+bool sellSig  = exitNow and posBefore == 1
+bool coverSig = exitNow and posBefore == -1
+
+if exitNow
+    posState    := 0
+    barsHeld    := 0
+    lastExitBar := bar_index
+
+// -- rate limiter over a rolling 100 bars ------------------------------------
+while array.size(entryBars) > 0 and bar_index - array.get(entryBars, 0) > 100
+    array.shift(entryBars)
+int  maxPer100  = isModeA ? FM_GATE_RATE : maxPer100In
+bool rateOk     = array.size(entryBars) < maxPer100
+bool cooldownOk = bar_index - lastExitBar >= math.max(cooldownIn, 1)
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE GATE - twelve conjunctive conditions. Every one is counted, and the
+// FIRST failure is what the card reports, so "why not?" always has an answer.
+// ════════════════════════════════════════════════════════════════════════════
+int    gatesPassed = 0
+int    gatesTotal  = 0
+string vetoText    = ""
+
+int   propDir  = propDir0
+float propConf = isModeA ? pSuccess * 100.0 : bConf
+
+bool g1 = featuresValid
+gatesTotal += 1
+if g1
+    gatesPassed += 1
+else if vetoText == ""
+    vetoText := modelOk ? "warming up, " + str.tostring(math.max(WARMUP_BARS - bar_index, 0)) + " bars left" : "frozen model failed to load; re-run the exporter"
+
+bool g2 = propDir != 0
+gatesTotal += 1
+if g2
+    gatesPassed += 1
+else if vetoText == ""
+    vetoText := "no directional evidence"
+
+bool g3 = propDir > 0 ? allowLong : propDir < 0 ? allowShort : false
+gatesTotal += 1
+if g3
+    gatesPassed += 1
+else if vetoText == "" and g2
+    vetoText := propDir > 0 ? "long entries disabled" : "short entries disabled"
+
+bool g4 = isModeA ? domRegime != 3 : pQuiet < bQuietMax
+gatesTotal += 1
+if g4
+    gatesPassed += 1
+else if vetoText == ""
+    vetoText := "quiet regime, p=" + str.tostring(pQuiet, "#.##")
+
+bool g5 = hazard <= (isModeA ? FM_RG_HAZ_MAX : bHazMax)
+gatesTotal += 1
+if g5
+    gatesPassed += 1
+else if vetoText == ""
+    vetoText := "regime in transition, hazard " + str.tostring(hazard, "#.##")
+
+bool g6 = isModeA ? evLcbNet > FM_GATE_EVLCB : math.abs(bScore) >= bScoreMin
+gatesTotal += 1
+if g6
+    gatesPassed += 1
+else if vetoText == ""
+    vetoText := isModeA ? "edge " + str.tostring(edgeLcb, "#.###") + " - cost " + str.tostring(roundTrip, "#.###") + " = " + str.tostring(evLcbNet, "#.###") + " sigma, under the " + str.tostring(FM_GATE_EVLCB, "#.##") + " gate" : "score " + str.tostring(math.abs(bScore), "#.##") + " under strictness " + str.tostring(bScoreMin, "#.##")
+
+bool g7 = isModeA ? pSuccess >= FM_GATE_PMIN : bConf >= 55.0
+gatesTotal += 1
+if g7
+    gatesPassed += 1
+else if vetoText == ""
+    vetoText := "confidence " + str.tostring(propConf, "#.#") + "% under the floor"
+
+bool g8 = ebeAligned >= (isModeA ? FM_GATE_EBEMIN : bBreadth)
+gatesTotal += 1
+if g8
+    gatesPassed += 1
+else if vetoText == ""
+    vetoText := "evidence breadth " + str.tostring(ebeAligned, "#.##") + " under " + str.tostring(isModeA ? FM_GATE_EBEMIN : bBreadth, "#.##")
+
+bool g9 = not useHtfConf or na(htfSlopeT) or propDir == 0 or (propDir > 0 ? htfSlopeT > -0.5 : htfSlopeT < 0.5)
+gatesTotal += 1
+if g9
+    gatesPassed += 1
+else if vetoText == ""
+    vetoText := "higher timeframe disagrees, t=" + str.tostring(htfSlopeT, "#.#")
+
+bool g10 = inSession
+gatesTotal += 1
+if g10
+    gatesPassed += 1
+else if vetoText == ""
+    vetoText := "outside the session filter"
+
+bool g11 = rateOk and cooldownOk
+gatesTotal += 1
+if g11
+    gatesPassed += 1
+else if vetoText == ""
+    vetoText := not rateOk ? "rate limit, " + str.tostring(maxPer100) + " entries per 100 bars" : "cooldown, " + str.tostring(math.max(math.max(cooldownIn, 1) - (bar_index - lastExitBar), 0)) + " bars left"
+
+bool g12 = posState == 0
+gatesTotal += 1
+if g12
+    gatesPassed += 1
+else if vetoText == ""
+    vetoText := "already in a position"
+
+bool gateOpen = g1 and g2 and g3 and g4 and g5 and g6 and g7 and g8 and g9 and g10 and g11 and g12
+
+// -- entries: confirmed bars only --------------------------------------------
+bool buySig   = confirmed and gateOpen and propDir > 0
+bool shortSig = confirmed and gateOpen and propDir < 0
+
+float stopSigma   = f_clip(FM_STOP_SIGMA * (pStress > 0.2 ? 1.0 + 0.6 * pStress : 1.0) * (jumpShare > 0.4 ? 1.0 + 0.4 * (jumpShare - 0.4) / 0.6 : 1.0), 0.4, 8.0)
+float stopDistVol = close * (1.0 - math.exp(-stopSigma * sigmaFcst))
+float stopDistAtr = atrMultIn * nz(atrVal, stopDistVol)
+float stopDist    = math.max(stopModeIn == STOP_ATR ? stopDistAtr : stopDistVol, syminfo.mintick)
+float tgtDist     = stopDist * (stopModeIn == STOP_ATR ? rrIn : FM_TGT_SIGMA / FM_STOP_SIGMA)
+float planStop    = propDir > 0 ? close - stopDist : close + stopDist
+float planTarget  = propDir > 0 ? close + tgtDist : close - tgtDist
+
+if buySig or shortSig
+    posState := buySig ? 1 : -1
+    entryPx  := close
+    stopPx   := planStop
+    targetPx := planTarget
     barsHeld := 0
+    array.push(entryBars, bar_index)
 
-// Trade-rate limiter: a brake, not an optimiser. If the gate somehow starts
-// firing constantly, something has broken and the right response is to trade
-// less, not more.
-if array.size(recentEntries) > 0
-    while array.size(recentEntries) > 0 and bar_index - array.get(recentEntries, 0) > 100
-        array.shift(recentEntries)
-rateOk = array.size(recentEntries) < FM_GATE_RATE
+// ════════════════════════════════════════════════════════════════════════════
+// DISPLAY
+// ════════════════════════════════════════════════════════════════════════════
+plotshape(buySig,   title="BUY",   style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0),  size=size.small, text="BUY",   textcolor=color.new(color.green, 0))
+plotshape(shortSig, title="SHORT", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),    size=size.small, text="SHORT", textcolor=color.new(color.red, 0))
+plotshape(sellSig,  title="SELL",  style=shape.xcross,       location=location.abovebar, color=color.new(color.orange, 0), size=size.tiny,  text="SELL",  textcolor=color.new(color.orange, 0))
+plotshape(coverSig, title="COVER", style=shape.xcross,       location=location.belowbar, color=color.new(color.aqua, 0),   size=size.tiny,  text="COVER", textcolor=color.new(color.aqua, 0))
 
-// The ten conjunctive gate conditions (SPEC.md §7). Conjunctive rather than
-// scored, because a weighted score lets a spectacular reading on one axis buy
-// past a disqualifying reading on another.
-tradeable  = not timeframe.isintraday or session.ismarket
-gEv        = evLcb > FM_GATE_EVLCB
-gP         = pSuccess >= FM_GATE_PMIN
-gEbe       = ebeAligned >= FM_GATE_EBEMIN
-gHazard    = hazard <= FM_RG_HAZ_MAX
-gRegime    = domRegime != 3
-gDir       = direction != 0 and (direction > 0 or true)
-gateOpen   = featuresValid and gEv and gP and gEbe and gHazard and gRegime and gDir and rateOk and tradeable and posState == 0
+plot(showLevels and posState != 0 ? stopPx : na,   "Stop",         color=color.new(color.red, 15),   style=plot.style_linebr, linewidth=1)
+plot(showLevels and posState != 0 ? targetPx : na, "Target",       color=color.new(color.green, 15), style=plot.style_linebr, linewidth=1)
+plot(showLevels and posState != 0 ? entryPx : na,  "Signal price", color=color.new(color.gray, 40),  style=plot.style_linebr, linewidth=1)
 
-// Bar-close exits only: the vertical barrier and a confirmed reversal. Modelling
-// a stop as a bar-close decision would be a look-ahead error in the optimistic
-// direction, since it assumes the close was available at the stop price.
-wantExit = posState != 0 and (barsHeld >= FM_MAX_HOLD or (barsHeld >= FM_MIN_HOLD and direction == -posState and pSuccess >= FM_GATE_PEXIT and ebeAligned >= FM_GATE_EBEMIN * 0.7))
+color regTint = domRegime == 0 ? color.new(color.green, 94) : domRegime == 1 ? color.new(color.blue, 94) : domRegime == 2 ? color.new(color.red, 92) : color.new(color.gray, 96)
+bgcolor(showRegime and featuresValid ? regTint : color(na), title="Regime tint")
 
-confirmed = barstate.isconfirmed
-buySig    = confirmed and gateOpen and direction > 0
-shortSig  = confirmed and gateOpen and direction < 0
-sellSig   = confirmed and wantExit and posState == 1
-coverSig  = confirmed and wantExit and posState == -1
+if showLabels and (buySig or shortSig)
+    label.new(bar_index, buySig ? low : high,
+         text=(buySig ? "BUY " : "SHORT ") + str.tostring(close, format.mintick) + "\nstop " + str.tostring(planStop, format.mintick) + "\ntarget " + str.tostring(planTarget, format.mintick) + "\nconf " + str.tostring(propConf, "#.#") + "%",
+         style=buySig ? label.style_label_up : label.style_label_down,
+         color=color.new(buySig ? color.green : color.red, 80),
+         textcolor=chart.fg_color, size=size.small)
+
+// -- diagnostics card: it always says WHY ------------------------------------
+f_row(table t, int r, string k, string v, color vc, string sz) =>
+    table.cell(t, 0, r, k, text_color=color.new(color.gray, 10), text_size=sz, text_halign=text.align_left)
+    table.cell(t, 1, r, v, text_color=vc, text_size=sz, text_halign=text.align_right)
+
+var table card = table.new(cardPosIn == "Top right" ? position.top_right : cardPosIn == "Middle right" ? position.middle_right : cardPosIn == "Bottom right" ? position.bottom_right : cardPosIn == "Top left" ? position.top_left : position.bottom_left, 2, 20, border_width=1, frame_color=color.new(color.gray, 60))
+
+if showCard and barstate.islast
+    string tsz = cardSizeIn == "Tiny" ? size.tiny : cardSizeIn == "Normal" ? size.normal : size.small
+    string headline = not featuresValid ? "WARMING UP" : buySig ? "BUY" : shortSig ? "SHORT" : sellSig ? "SELL" : coverSig ? "COVER" : posState == 1 ? "IN LONG" : posState == -1 ? "IN SHORT" : "NO TRADE"
+    color  hcol = buySig or posState == 1 ? color.new(color.green, 20) : shortSig or posState == -1 ? color.new(color.red, 20) : color.new(color.gray, 20)
+    string setupTxt = setupIdx == 1 ? "sweep reversal" : setupIdx == 2 ? "compression break" : setupIdx == 3 ? "range fade" : "continuation"
+    string regTxt   = domRegime == 0 ? "Trending" : domRegime == 1 ? "Mean-reverting" : domRegime == 2 ? "Stress" : "Quiet"
+    string trTxt    = na(slopeT) ? "n/a" : (slopeT > 0.5 ? "up" : slopeT < -0.5 ? "down" : "flat") + ", t=" + str.tostring(slopeT, "#.#")
+    string moTxt    = moStrength > 0.3 ? (moDir > 0 ? "up, cheap displacement" : "down, cheap displacement") : "weak"
+    string vlTxt    = compression > 0.75 ? "compressed" : volRank > 0.85 ? "elevated" : volRank < 0.15 ? "very low" : "normal"
+    string lqTxt    = not hasVolume ? "no volume feed" : sweepAge <= 4 ? (sweepDir > 0 ? "low swept, reclaimed" : "high swept, rejected") : absorbing ? "absorbing" : "normal"
+    string stopTxt  = posState != 0 ? str.tostring(stopPx, format.mintick) : gateOpen ? str.tostring(planStop, format.mintick) : "n/a"
+    string tgtTxt   = posState != 0 ? str.tostring(targetPx, format.mintick) : gateOpen ? str.tostring(planTarget, format.mintick) : "n/a"
+
+    table.clear(card, 0, 0, 1, 19)
+    table.cell(card, 0, 0, "TI-A", text_color=color.white, bgcolor=hcol, text_size=tsz)
+    table.cell(card, 1, 0, headline, text_color=color.white, bgcolor=hcol, text_size=tsz)
+    f_row(card, 1,  "Mode",          isModeA ? "A - frozen research model" : "B - observation, strict " + str.tostring(strictIn), color.white, tsz)
+    f_row(card, 2,  "Warm-up",       featuresValid ? "ready" : str.tostring(math.max(WARMUP_BARS - bar_index, 0)) + " bars left", featuresValid ? color.white : color.orange, tsz)
+    f_row(card, 3,  "Position",      posState == 1 ? "long, " + str.tostring(barsHeld) + " bars" : posState == -1 ? "short, " + str.tostring(barsHeld) + " bars" : "flat", color.white, tsz)
+    f_row(card, 4,  "Direction",     propDir > 0 ? "long" : propDir < 0 ? "short" : "none", color.white, tsz)
+    f_row(card, 5,  "Confidence",    str.tostring(propConf, "#.#") + "%", color.white, tsz)
+    f_row(card, 6,  "Regime",        regTxt + " " + str.tostring(regimeCommit * 100.0, "#") + "%", color.white, tsz)
+    f_row(card, 7,  "Regime hazard", str.tostring(hazard, "#.##"), hazard > (isModeA ? FM_RG_HAZ_MAX : bHazMax) ? color.orange : color.white, tsz)
+    f_row(card, 8,  "Setup",         setupTxt, color.white, tsz)
+    f_row(card, 9,  "Trend",         trTxt, color.white, tsz)
+    f_row(card, 10, "Momentum",      moTxt, color.white, tsz)
+    f_row(card, 11, "Volatility",    vlTxt + ", " + str.tostring(sigmaFcst * 100.0, "#.##") + "%/bar", color.white, tsz)
+    f_row(card, 12, "Liquidity",     lqTxt, color.white, tsz)
+    f_row(card, 13, "Higher TF",     na(htfSlopeT) ? "building" : htfSlopeT > 0.5 ? "up" : htfSlopeT < -0.5 ? "down" : "flat", color.white, tsz)
+    f_row(card, 14, "Evidence",      "|L| " + str.tostring(absL, "#.##") + ", breadth " + str.tostring(ebeAligned, "#.##"), color.white, tsz)
+    f_row(card, 15, "Edge - cost",   isModeA ? str.tostring(edgeLcb, "#.###") + " - " + str.tostring(roundTrip, "#.###") + " = " + str.tostring(evLcbNet, "#.###") + " sigma" : "not used in Mode B", isModeA and evLcbNet > FM_GATE_EVLCB ? color.new(color.green, 10) : color.white, tsz)
+    f_row(card, 16, "Gates passed",  str.tostring(gatesPassed) + " / " + str.tostring(gatesTotal), gatesPassed == gatesTotal ? color.new(color.green, 10) : color.white, tsz)
+    f_row(card, 17, "Stop / target", stopTxt + "  /  " + tgtTxt, color.white, tsz)
+    f_row(card, 18, "Why no trade",  gateOpen or posState != 0 ? "n/a" : vetoText, color.orange, tsz)
+    f_row(card, 19, "Model " + FM_HASH, FM_PLACEHOLDER ? "PLACEHOLDER - not exported" : "NOT market-validated", color.new(color.orange, 15), tsz)
+
+// ════════════════════════════════════════════════════════════════════════════
+// ALERTS
+// Six static alertconditions - pick them from the Alerts dialog - plus dynamic
+// alert() calls carrying the stop, target, confidence and mode in the body.
+// ════════════════════════════════════════════════════════════════════════════
+alertcondition(buySig,              title="TI-A BUY",       message="TI-A BUY {{ticker}} {{interval}} @ {{close}}")
+alertcondition(sellSig,             title="TI-A SELL",      message="TI-A SELL (close long) {{ticker}} {{interval}} @ {{close}}")
+alertcondition(shortSig,            title="TI-A SHORT",     message="TI-A SHORT {{ticker}} {{interval}} @ {{close}}")
+alertcondition(coverSig,            title="TI-A COVER",     message="TI-A COVER (close short) {{ticker}} {{interval}} @ {{close}}")
+alertcondition(buySig or shortSig,  title="TI-A any ENTRY", message="TI-A ENTRY {{ticker}} {{interval}} @ {{close}}")
+alertcondition(sellSig or coverSig, title="TI-A any EXIT",  message="TI-A EXIT {{ticker}} {{interval}} @ {{close}}")
+
+if buySig or shortSig
+    alert(str.format("TI-A {0} | {1} {2} | signal {3} | stop {4} | target {5} | confidence {6}% | mode {7} | NOT VALIDATED",
+         buySig ? "BUY" : "SHORT", syminfo.ticker, timeframe.period,
+         str.tostring(close, format.mintick), str.tostring(planStop, format.mintick),
+         str.tostring(planTarget, format.mintick), str.tostring(propConf, "#.#"),
+         isModeA ? "A-frozen" : "B-observation"), alert.freq_once_per_bar_close)
 
 if sellSig or coverSig
-    posState := 0
-    barsHeld := 0
-if buySig
-    posState := 1
-    entryPx := close
-    stopPx := close * math.exp(-stopSig * sigmaFcst)
-    targetPx := close * math.exp(tgtSig * sigmaFcst)
-    barsHeld := 0
-    entryBar := bar_index
-    array.push(recentEntries, bar_index)
-if shortSig
-    posState := -1
-    entryPx := close
-    stopPx := close * math.exp(stopSig * sigmaFcst)
-    targetPx := close * math.exp(-tgtSig * sigmaFcst)
-    barsHeld := 0
-    entryBar := bar_index
-    array.push(recentEntries, bar_index)
-
-// ============================================================================
-// Display
-// ============================================================================
-plotshape(buySig,   title="BUY",   style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0), size=size.small, text="BUY")
-plotshape(shortSig, title="SHORT", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),   size=size.small, text="SHORT")
-plotshape(sellSig,  title="SELL",  style=shape.xcross,       location=location.abovebar, color=color.new(color.orange, 0), size=size.tiny, text="SELL")
-plotshape(coverSig, title="COVER", style=shape.xcross,       location=location.belowbar, color=color.new(color.aqua, 0),   size=size.tiny, text="COVER")
-
-plot(showLevels and posState != 0 ? stopPx   : na, "Stop",   color=color.new(color.red, 20),   style=plot.style_linebr, linewidth=1)
-plot(showLevels and posState != 0 ? targetPx : na, "Target", color=color.new(color.green, 20), style=plot.style_linebr, linewidth=1)
-
-regimeColour = domRegime == 0 ? color.new(color.green, 94) : domRegime == 1 ? color.new(color.blue, 94) : domRegime == 2 ? color.new(color.red, 94) : color.new(color.gray, 96)
-bgcolor(showRegime and featuresValid ? regimeColour : na, title="Regime tint")
-
-// The nine fixed rows of SPEC.md §8. The card does not grow with the model: a
-// diagnostic surface requiring the user to weigh eight sub-indicators has not
-// reduced their decision problem, it has renamed it.
-var table card = table.new(position.top_right, 2, 12, border_width=1)
-f_pct(x) => na(x) ? "n/a" : str.tostring(math.round(100 * x)) + "%"
-if showCard and barstate.islast
-    tsize = cardSize == "Tiny" ? size.tiny : cardSize == "Normal" ? size.normal : size.small
-    headline = not featuresValid ? "WARMING UP" : posState == 1 ? "LONG" : posState == -1 ? "SHORT" : gateOpen ? (direction > 0 ? "BUY" : "SHORT") : "NO TRADE"
-    hcol = headline == "BUY" ? color.green : headline == "SHORT" ? color.red : color.gray
-    table.cell(card, 0, 0, "TI-A", text_color=color.white, bgcolor=hcol, text_size=tsize)
-    table.cell(card, 1, 0, headline, text_color=color.white, bgcolor=hcol, text_size=tsize)
-    rows = array.from("Trend Alignment", "Liquidity", "Momentum Expansion", "Volatility", "Regime", "Institutional Flow", "Evidence Breadth", "Confidence", "Expected R:R")
-    liqTxt = sweepAge <= 4 ? "Confirmed sweep" : (absorbing ? "Absorbing" : "None")
-    volTxt = compression > 0.75 ? "Compressed" : volRank > 0.85 ? "Elevated" : volRank < 0.15 ? "Very low" : "Favourable"
-    regTxt = domRegime == 0 ? "Trending" : domRegime == 1 ? "Mean-Reverting" : domRegime == 2 ? "Stress" : "Quiet"
-    flowTxt = nz(absRank, 0) < 0.65 ? (math.abs(moScore) > 0.4 ? "Directional flow" : "Neutral") : (clvEma > 0.15 ? "Accumulation" : clvEma < -0.15 ? "Distribution" : "Absorption, side unclear")
-    vals = array.from(f_pct(math.abs(trScore) * trRel) + (trScore > 0 ? " long" : " short"), liqTxt, f_pct(math.abs(moScore)), volTxt, regTxt, flowTxt, str.tostring(ebeAligned, "#.#") + " independent", f_pct(pSuccess) + "  [" + f_pct(pLow) + "-" + f_pct(pHigh) + "]", str.tostring(f_safediv(tgtSig, stopSig, 0), "#.##") + " : 1")
-    for i = 0 to 8
-        table.cell(card, 0, i + 1, array.get(rows, i), text_color=color.gray, text_size=tsize, text_halign=text.align_left)
-        table.cell(card, 1, i + 1, array.get(vals, i), text_color=color.white, text_size=tsize, text_halign=text.align_right)
-    evTxt = str.tostring(evLcb, "+#.###") + "s at 90%"
-    table.cell(card, 0, 10, "Expectancy (net)", text_color=color.gray, text_size=tsize, text_halign=text.align_left)
-    table.cell(card, 1, 10, evTxt, text_color=evLcb > FM_GATE_EVLCB ? color.green : color.gray, text_size=tsize, text_halign=text.align_right)
-    // Why the system stood aside. A NO TRADE is always answerable.
-    veto = not featuresValid ? "warming up" : not gRegime ? "quiet regime" : not gHazard ? "regime in transition" : not gEbe ? "breadth " + str.tostring(ebeAligned, "#.##") + " < " + str.tostring(FM_GATE_EBEMIN) : not gEv ? "expectancy below gate" : not gP ? "probability below floor" : not rateOk ? "trade rate limiter" : posState != 0 ? "in position" : ""
-    table.cell(card, 0, 11, "Stood aside", text_color=color.gray, text_size=tsize, text_halign=text.align_left)
-    table.cell(card, 1, 11, veto, text_color=color.orange, text_size=tsize, text_halign=text.align_right)
-
-alertcondition(buySig,   title="TI-A BUY",   message="TI-A BUY {{ticker}} @ {{close}}")
-alertcondition(shortSig, title="TI-A SHORT", message="TI-A SHORT {{ticker}} @ {{close}}")
-alertcondition(sellSig,  title="TI-A SELL",  message="TI-A SELL (close long) {{ticker}} @ {{close}}")
-alertcondition(coverSig, title="TI-A COVER", message="TI-A COVER (close short) {{ticker}} @ {{close}}")
+    alert(str.format("TI-A {0} | {1} {2} | exit {3} | reason {4} | mode {5}",
+         sellSig ? "SELL" : "COVER", syminfo.ticker, timeframe.period,
+         str.tostring(exitPx, format.mintick), exitWhy,
+         isModeA ? "A-frozen" : "B-observation"), alert.freq_once_per_bar_close)

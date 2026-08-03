@@ -151,7 +151,7 @@ how D2 survived), and both regimes reward their own setups (H2 untestable).
 | Area | Verdict |
 |---|---|
 | Causality / repainting | **No defect found.** Prefix-replay and append-stability tests are bit-exact; pivots, sweeps and HTF views pay their confirmation delays; the forward-only recursions are genuinely forward-only. |
-| `request.security` usage | **No defect.** Both `[1]` and `lookahead_off` present; static checker enforces it. |
+| `request.security` usage | **Superseded in rc5.** The audit checked the flags and found both `[1]` and `lookahead_off` present, but did not check whether the *expression* was legal: it was a mutable variable, which Pine rejects, so the file this row cleared could never have compiled. The port now contains no `request.security` at all. See `pine/CHANGELOG_TRADINGVIEW.md` C1. |
 | Session/timezone | Fixed-offset design is documented and intentional; production is told to supply exchange calendars. No change. |
 | Numerical stability | 40k-bar run: correlation condition number 4.8, no drift, bounded state. Periodic rebuilds in `RollingMoments` are doing their job. No change. |
 | Parameter sensitivity | 295 configurations across every scannable parameter's declared neighbourhood run without failure; plateau protocol pre-registered. No change. |

@@ -4,6 +4,57 @@ All notable changes, most recent first. Every entry that touched a
 `THEORY`-tagged default is also recorded in the trials ledger of
 `docs/00-PREREGISTRATION.md`.
 
+## 1.0.0-rc5 — TradingView port repair
+
+- **Rewrote both Pine files.** The previous `pine/TIA.pine` could not compile:
+  it passed mutable-variable expressions to `request.security` (rejected
+  outright by Pine), assembled timeframe strings that were invalid on weekly
+  charts, gave a helper a parameter named `str` — shadowing the namespace
+  whose `.split` it then called — used comma-separated multiple assignment in
+  four places, and passed a loop variable as a `math.sum` length where Pine
+  requires a simple int. Every one is documented with its fix in
+  `pine/CHANGELOG_TRADINGVIEW.md`.
+- **Removed `request.security` entirely.** The higher timeframe is now built
+  in-script by aggregating five closed chart bars, with its own Kalman filter
+  and high/low rings — the same causal aggregator the Python reference uses.
+  It cannot look ahead, and it is valid at every chart resolution. A test
+  fails if `request.security` reappears in either file.
+- **Barrier exits now emit SELL/COVER.** Stop and target hits closed the
+  position silently, so a trader watching the chart saw a BUY and then
+  nothing. Since the visible contract is exactly five words, an exit that
+  prints nothing is a hole in it. All four exit paths — stop, target, time,
+  reversal — now flow through one emitter that names its reason and prices
+  gaps through the stop at the open.
+- **Permutation entropy is O(1).** It re-read 360 bars of history per bar
+  through a loop-variable index: a performance trap and a `max_bars_back`
+  runtime-error risk. Replaced with ring-buffered pattern counts.
+- **Added two operating modes.** Mode A evaluates the exported model through
+  its original, unrelaxed gate — 5 trades across 22,626 daily bars of six
+  ETFs, and it prints the edge-minus-cost arithmetic when it declines. Mode B
+  gates the same engines on a reliability-weighted blend with a strictness
+  slider, giving 97 entries over the same bars so a chart can be observed.
+  Mode B is recorded, in both script headers and the docs, as firing ~21 times
+  per 4,000 bars of synthetic martingale where Mode A fires 0–1: it shows what
+  the engines react to and is not evidence that those reactions are tradeable.
+- **The two scripts share a byte-identical core.** Delimited by
+  `BEGIN/END SHARED CORE` and enforced by a test, so the strategy cannot trade
+  something the indicator does not paint.
+- **Strengthened `tools/pinelint.py`** from 8 rule families to 16: simple-int
+  lengths, use-before-definition, undeclared `:=` targets, table index bounds,
+  global-only constructs in local scope, history depth against
+  `max_bars_back`, untyped parameters. Its `request.security` repaint rule was
+  itself scanning comments and firing on the comment that says the script
+  contains none; it now scans code only.
+- **Added `tools/pinesim.py`** — a transliteration of the Pine arithmetic into
+  Python, driven by the same `frozen_model.json`, so signal frequency and
+  runtime safety can be measured without a Pine compiler. It does not prove
+  the files compile, and says so.
+- **Added `python/tests/test_pine_port.py`** (21 checks) and the two
+  TradingView documents: `pine/START_HERE_TRADINGVIEW.md` (install, smoke
+  test, expected behaviour, eight troubleshooting situations) and
+  `pine/CHANGELOG_TRADINGVIEW.md` (every defect, every omission, and a manual
+  compile-verification checklist).
+
 ## 1.0.0-rc4 — final review board
 
 - **Wired the safety layer.** `docs/13-MONITORING.md` documented a demotion
