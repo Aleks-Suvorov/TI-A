@@ -38,6 +38,15 @@ catching a real defect in this repository's history):
       comment that says the script contains no ``request.security`` at all.
   15. Every ``FM_`` constant used is declared in the generated block.
   16. A ``barstate.isconfirmed`` guard exists.
+  17. Every ``math``/``str``/``ta``/``array``/``table`` call is a real Pine v6
+      built-in, checked against the complete function set for each namespace.
+      ``math.tanh`` does not exist and shipped once; see ``BUILTINS`` below for
+      why its blast radius was seven errors in a different part of the file.
+  18. Continuation lines are not indented by a multiple of four. Pine tells a
+      wrapped line from a new local block by nothing else.
+  19. Every ``f_*`` helper called is defined somewhere in the same file. The
+      two scripts share a core but keep separate tails, so a helper or input
+      that lives in only one of them is easy to reference from the other.
 
 Run:  cd python && python3 tools/pinelint.py
 Exit code is the number of problems found.
@@ -383,6 +392,20 @@ def check_file(path: Path) -> None:
                 hint = f"; did you mean {', '.join(near[:3])}?" if near else ""
                 err(path, n, f"'{ns}.{fn}' is not a Pine v6 built-in{hint}", raw[n - 1])
 
+    # --- every f_* helper called must actually be defined in this file -------
+    # The two scripts share a core but keep separate tails, so a helper (or an
+    # input) that exists only in one file is an easy thing to reference from
+    # the other. `upCol` shipped that way for exactly one commit.
+    called = set()
+    for c in code_lines:
+        for m in re.finditer(r"(?<![.\w])(f_\w+)\s*\(", c):
+            called.add(m.group(1))
+    for name in sorted(called - set(functions)):
+        for n, c in enumerate(code_lines, 1):
+            if re.search(r"(?<![.\w])" + re.escape(name) + r"\s*\(", c):
+                err(path, n, f"'{name}' is called but never defined in this file", raw[n - 1])
+                break
+
     # --- functions must be defined before first use --------------------------
     for name, defline in functions.items():
         for n, c in enumerate(code_lines, 1):
@@ -406,7 +429,13 @@ def check_file(path: Path) -> None:
         if m:
             got = call_args(c, m.end() - 1)
             if got:
-                args = [a for a in split_args(got[0]) if "=" not in a.split("(")[0]]
+                # Positional args only. The test must be "starts with
+                # `name=`", not "contains an =": table.new's first argument is
+                # a ternary on an input, and `cardPosIn == "Top right" ? ...`
+                # contains `==`. Discarding it shifted every index by one, the
+                # int() then raised, and this whole check silently did nothing.
+                args = [a for a in split_args(got[0])
+                        if not re.match(r"^\w+\s*=(?!=)", a)]
                 if len(args) >= 3:
                     try:
                         tables[m.group(1)] = (int(args[1]), int(args[2]))

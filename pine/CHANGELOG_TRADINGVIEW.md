@@ -231,6 +231,63 @@ generated `BEGIN/END FROZEN MODEL` block, and a test compares `FM_HASH`
 against the exported manifest, so a stale file fails the build rather than
 trading a model nobody has.
 
+### U1. Trade information lived in fixed-pixel labels
+
+Reported after the first working compile: *"when I move the chart around the
+signals stay in place instead of locking onto candles."*
+
+The entry marker was a four-line `label` carrying price, stop, target and
+confidence. Labels **are** anchored by `bar_index` — but they render at a fixed
+pixel size regardless of zoom. On a 5-minute chart one spanned roughly fifteen
+candles, so it read as a box floating over the chart rather than an annotation
+on a bar, and zooming made the mismatch worse rather than better.
+
+Replaced with **bar-anchored geometry**: a red `box` from entry to stop, a
+green `box` from entry to target, and a dashed `line` at the entry price, all
+created on the entry bar and extended one bar at a time until the trade closes,
+then frozen. Boxes scale with the candles because their corners are bar indices
+and prices. The whole trade — start, risk, target, finish — is now legible
+without reading a number.
+
+The numbers moved into **tooltips** on small markers, so hovering gives detail
+without the chart carrying it permanently.
+
+The status panel remains viewport-pinned, because a `table` in Pine is
+viewport-pinned by construction. That is the correct home for "what is true
+right now"; it is no longer the only place a trade is described.
+
+### U2. Exits were a bare cross with no outcome
+
+Reported as *"I can't tell if you added when to enter but ALSO when to close."*
+
+Exits were emitted correctly (defect R2 above) but displayed as a small `✕`
+with no reason and no result, and the panel said nothing about how an open
+trade would end.
+
+Now:
+
+* every exit prints its **result in R** and its reason — `+1.62R  target hit`,
+  `−1.00R  stop hit` — coloured by outcome. R is the move divided by the
+  trade's own initial risk, which is the only scale on which trades of
+  different sizes and volatilities compare;
+* while a position is open the panel switches to an **OPEN TRADE** section
+  naming all four ways it can end — stop, target, the 30-bar limit, or a
+  reversal signal — plus the live open result in R and the bars held.
+
+### U3. The status panel had no hierarchy
+
+Twenty rows of uniform grey label/value pairs, so nothing read first.
+
+Rewritten as a sectioned panel — headline state, then `SIGNAL` (or `OPEN
+TRADE`), `MARKET`, and `EVIDENCE` — on TradingView's own dark palette so it
+looks native. Confidence and gates render as ten-cell meters rather than bare
+numbers. Two display modes: **Compact** (default, what you act on) and
+**Detailed** (adds every engine reading). The regime tint dropped from 92–94%
+to 95–97% transparency; it is context, not a signal.
+
+The disclaimer row is pinned to the footer of both modes and cannot be
+scrolled away.
+
 ---
 
 ## Part 3 — what is new
@@ -349,7 +406,7 @@ To finish verification, follow the manual checklist below.
 
 1. Paste `pine/TIA.pine` into a **new indicator** in the Pine Editor. Click
    **Save**. Expect: no red error; the status line reads "Script saved".
-2. Click **Add to chart** on **SPY, 1D**. Expect: the diagnostics card in the
+2. Click **Add to chart** on **SPY, 1D**. Expect: the status panel in the
    top-right within a few seconds.
 3. Scroll back so at least 3,000 bars are loaded. Expect: the **Warm-up** row
    reads `ready`, and the **Why no trade** row shows a specific reason.

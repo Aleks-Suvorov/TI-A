@@ -111,6 +111,8 @@ int  endIn       = input.time(timestamp("01 Jan 2035 00:00 +0000"), "End",   gro
 bool showLevels = input.bool(true, "Show stop / target lines", group="Display")
 bool showCard   = input.bool(true, "Show diagnostics card",    group="Display")
 string cardSizeIn = input.string("Small", "Card text size", options=["Tiny", "Small", "Normal"], group="Display")
+color  upCol    = input.color(#26a69a, "Long colour",  group="Display", inline="col")
+color  dnCol    = input.color(#ef5350, "Short colour", group="Display", inline="col")
 
 bool isModeA = modeIn == MODE_A
 
@@ -1098,37 +1100,96 @@ if startEnable and confirmed and time > endIn and posState != 0
 
 // ════════════════════════════════════════════════════════════════════════════
 // DISPLAY
+// The same visual language as the indicator, minus the trade zones: the
+// Strategy Tester draws its own entry/exit shading, and two sets of trade
+// geometry on one chart is worse than either alone. The live bracket is drawn
+// as two lines, because those are what the emulator is actually working.
 // ════════════════════════════════════════════════════════════════════════════
-plot(showLevels and posState != 0 ? stopPx : na,   "Stop",   color=color.new(color.red, 15),   style=plot.style_linebr, linewidth=1)
-plot(showLevels and posState != 0 ? targetPx : na, "Target", color=color.new(color.green, 15), style=plot.style_linebr, linewidth=1)
+color C_PANEL  = color.new(#131722, 8)
+color C_HEAD   = color.new(#1e222d, 0)
+color C_SECT   = color.new(#1e222d, 20)
+color C_BORDER = color.new(#2a2e39, 20)
+color C_LABEL  = #787b86
+color C_VALUE  = #d1d4dc
+color C_MUTED  = #5d606b
+color C_WARN   = #ff9800
+color C_GOOD   = #26a69a
 
-f_row(table t, int r, string k, string v, color vc, string sz) =>
-    table.cell(t, 0, r, k, text_color=color.new(color.gray, 10), text_size=sz, text_halign=text.align_left)
-    table.cell(t, 1, r, v, text_color=vc, text_size=sz, text_halign=text.align_right)
+f_meter(float frac, int width) =>
+    int n = int(math.round(f_clip(frac, 0.0, 1.0) * float(width)))
+    string outS = ""
+    for i = 0 to math.max(width, 1) - 1
+        outS := outS + (i < n ? "█" : "░")
+    outS
 
-var table card = table.new(position.top_right, 2, 14, border_width=1, frame_color=color.new(color.gray, 60))
+f_rmult(int dir, float entry, float stop, float px) =>
+    float risk = math.abs(entry - stop)
+    risk <= 0.0 or na(entry) or na(px) ? 0.0 : (dir > 0 ? px - entry : entry - px) / risk
+
+plot(showLevels and posState != 0 ? stopPx : na,   "Stop",   color=color.new(dnCol, 20), style=plot.style_linebr, linewidth=1)
+plot(showLevels and posState != 0 ? targetPx : na, "Target", color=color.new(upCol, 20), style=plot.style_linebr, linewidth=1)
+
+f_kv(table t, int r, string k, string v, color vc, string sz) =>
+    table.cell(t, 0, r, " " + k, text_color=C_LABEL, text_size=sz, text_halign=text.align_left,  bgcolor=C_PANEL)
+    table.cell(t, 1, r, v + " ", text_color=vc,      text_size=sz, text_halign=text.align_right, bgcolor=C_PANEL)
+
+f_sec(table t, int r, string k, string sz) =>
+    table.cell(t, 0, r, " " + k, text_color=C_MUTED, text_size=sz, text_halign=text.align_left,  bgcolor=C_SECT)
+    table.cell(t, 1, r, "",      text_color=C_MUTED, text_size=sz, text_halign=text.align_right, bgcolor=C_SECT)
+
+var table card = table.new(position.top_right, 2, 20, border_width=0, frame_width=1, frame_color=C_BORDER)
 
 if showCard and barstate.islast
     string tsz = cardSizeIn == "Tiny" ? size.tiny : cardSizeIn == "Normal" ? size.normal : size.small
-    string headline = not featuresValid ? "WARMING UP" : posState == 1 ? "IN LONG" : posState == -1 ? "IN SHORT" : "FLAT"
-    color  hcol = posState == 1 ? color.new(color.green, 20) : posState == -1 ? color.new(color.red, 20) : color.new(color.gray, 20)
+    string state = not featuresValid ? "WARMING UP" : posState == 1 ? "LONG" : posState == -1 ? "SHORT" : "FLAT"
+    color  stateCol = not featuresValid ? color.new(C_WARN, 40) : posState == 1 ? color.new(upCol, 10) : posState == -1 ? color.new(dnCol, 10) : color.new(#2a2e39, 0)
     string regTxt = domRegime == 0 ? "Trending" : domRegime == 1 ? "Mean-reverting" : domRegime == 2 ? "Stress" : "Quiet"
-    table.clear(card, 0, 0, 1, 13)
-    table.cell(card, 0, 0, "TI-A strategy", text_color=color.white, bgcolor=hcol, text_size=tsz)
-    table.cell(card, 1, 0, headline, text_color=color.white, bgcolor=hcol, text_size=tsz)
-    f_row(card, 1,  "Mode",          isModeA ? "A - frozen research model" : "B - observation, strict " + str.tostring(strictIn), color.white, tsz)
-    f_row(card, 2,  "Warm-up",       featuresValid ? "ready" : str.tostring(math.max(WARMUP_BARS - bar_index, 0)) + " bars left", featuresValid ? color.white : color.orange, tsz)
-    f_row(card, 3,  "Regime",        regTxt + " " + str.tostring(regimeCommit * 100.0, "#") + "%", color.white, tsz)
-    f_row(card, 4,  "Direction",     propDir > 0 ? "long" : propDir < 0 ? "short" : "none", color.white, tsz)
-    f_row(card, 5,  "Confidence",    str.tostring(propConf, "#.#") + "%", color.white, tsz)
-    f_row(card, 6,  "Gates passed",  str.tostring(gatesPassed) + " / " + str.tostring(gatesTotal), gatesPassed == gatesTotal ? color.new(color.green, 10) : color.white, tsz)
-    f_row(card, 7,  "Why no trade",  gateOpen or posState != 0 ? "n/a" : vetoText, color.orange, tsz)
-    f_row(card, 8,  "Next size",     qtyOk ? str.tostring(qty, "#.####") + " units" : "0 - equity too small for this stop", qtyOk ? color.white : color.orange, tsz)
-    f_row(card, 9,  "Stop / target", posState != 0 ? str.tostring(stopPx, format.mintick) + "  /  " + str.tostring(targetPx, format.mintick) : "n/a", color.white, tsz)
-    f_row(card, 10, "Closed trades", str.tostring(strategy.closedtrades), color.white, tsz)
-    f_row(card, 11, "Open position", str.tostring(strategy.position_size, "#.####"), color.white, tsz)
-    f_row(card, 12, "Bars in trade", posState == 0 ? "n/a" : str.tostring(barsHeld) + " / " + str.tostring(FM_MAX_HOLD), color.white, tsz)
-    f_row(card, 13, "Model " + FM_HASH, FM_PLACEHOLDER ? "PLACEHOLDER - not exported" : "NOT market-validated", color.new(color.orange, 15), tsz)
+    float  liveR  = posState != 0 ? f_rmult(posState, strategy.position_avg_price, stopPx, close) : 0.0
+
+    table.clear(card, 0, 0, 1, 19)
+    table.cell(card, 0, 0, " TI-A strategy", text_color=#ffffff, text_size=tsz, text_halign=text.align_left,  bgcolor=stateCol)
+    table.cell(card, 1, 0, state + " ",      text_color=#ffffff, text_size=tsz, text_halign=text.align_right, bgcolor=stateCol)
+
+    int r = 1
+    if posState != 0
+        f_sec(card, r, "OPEN TRADE", tsz)
+        r += 1
+        f_kv(card, r, "Filled at", str.tostring(strategy.position_avg_price, format.mintick), C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Stop — exit here", str.tostring(stopPx, format.mintick), dnCol, tsz)
+        r += 1
+        f_kv(card, r, "Target — exit here", str.tostring(targetPx, format.mintick), upCol, tsz)
+        r += 1
+        f_kv(card, r, "Open result", (liveR >= 0.0 ? "+" : "") + str.tostring(liveR, "#.##") + "R", liveR >= 0.0 ? upCol : dnCol, tsz)
+        r += 1
+        f_kv(card, r, "Held", str.tostring(barsHeld) + " of " + str.tostring(FM_MAX_HOLD) + " bars", C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Size", str.tostring(strategy.position_size, "#.####") + " units", C_VALUE, tsz)
+        r += 1
+    else
+        f_sec(card, r, "SIGNAL", tsz)
+        r += 1
+        f_kv(card, r, "Direction", propDir > 0 ? "long" : propDir < 0 ? "short" : "none", propDir > 0 ? upCol : propDir < 0 ? dnCol : C_MUTED, tsz)
+        r += 1
+        f_kv(card, r, "Confidence", f_meter((propConf - 50.0) / 45.0, 10) + " " + str.tostring(propConf, "#") + "%", C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Gates passed", f_meter(float(gatesPassed) / float(gatesTotal), 10) + " " + str.tostring(gatesPassed) + "/" + str.tostring(gatesTotal), gatesPassed == gatesTotal ? C_GOOD : C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Why no trade", gateOpen ? "ready" : vetoText, gateOpen ? C_GOOD : C_WARN, tsz)
+        r += 1
+        f_kv(card, r, "Next size", qtyOk ? str.tostring(qty, "#.####") + " units" : "0 — equity too small for this stop", qtyOk ? C_VALUE : C_WARN, tsz)
+        r += 1
+
+    f_sec(card, r, "RESULTS SO FAR", tsz)
+    r += 1
+    f_kv(card, r, "Regime", regTxt + "  " + str.tostring(regimeCommit * 100.0, "#") + "%", C_VALUE, tsz)
+    r += 1
+    f_kv(card, r, "Closed trades", str.tostring(strategy.closedtrades), C_VALUE, tsz)
+    r += 1
+    f_kv(card, r, "Warm-up", featuresValid ? "ready" : str.tostring(math.max(WARMUP_BARS - bar_index, 0)) + " bars left", featuresValid ? C_VALUE : C_WARN, tsz)
+    r += 1
+    table.cell(card, 0, r, isModeA ? " Mode A — frozen" : " Mode B — strict " + str.tostring(strictIn), text_color=C_MUTED, text_size=tsz, text_halign=text.align_left, bgcolor=C_HEAD)
+    table.cell(card, 1, r, "NOT market-validated ", text_color=C_WARN, text_size=tsz, text_halign=text.align_right, bgcolor=C_HEAD)
 
 // ════════════════════════════════════════════════════════════════════════════
 // ALERTS — same six as the indicator, so one alert set covers both scripts.

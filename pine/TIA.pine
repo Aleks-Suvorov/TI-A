@@ -49,7 +49,7 @@
 // See docs/20-FINAL-REVIEW.md for what is and is not established.
 
 indicator("TI-A", shorttitle="TI-A", overlay=true, max_bars_back=500,
-     max_labels_count=100, max_lines_count=100)
+     max_labels_count=500, max_lines_count=500, max_boxes_count=500)
 
 // ════════════════════════════════════════════════════════════════════════════
 // INPUTS
@@ -79,12 +79,23 @@ float  atrMultIn  = input.float(2.0, "ATR multiple for the stop", minval=0.25, m
 float  rrIn       = input.float(1.625, "Target : stop ratio (ATR mode)", minval=0.25, maxval=10.0, step=0.125, group="Risk",
      tooltip="1.625 reproduces the frozen model's 2.6 sigma target against its 1.6 sigma stop.")
 
-bool   showCard   = input.bool(true,  "Show diagnostics card", group="Display")
-bool   showLevels = input.bool(true,  "Show signal / stop / target lines", group="Display")
-bool   showLabels = input.bool(true,  "Label entries with stop and target", group="Display")
+string CARD_OFF  = "Off"
+string CARD_MINI = "Compact"
+string CARD_FULL = "Detailed"
+string cardModeIn = input.string(CARD_MINI, "Status panel", options=[CARD_MINI, CARD_FULL, CARD_OFF], group="Display",
+     tooltip="Compact shows what you act on. Detailed adds every engine reading underneath.")
+string cardPosIn  = input.string("Top right", "Panel position", options=["Top right", "Middle right", "Bottom right", "Top left", "Bottom left"], group="Display")
+string cardSizeIn = input.string("Small", "Panel text size", options=["Tiny", "Small", "Normal"], group="Display")
+
+bool   showTrades = input.bool(true,  "Draw trades on the chart", group="Display",
+     tooltip="Risk and reward zones drawn from the entry bar to the exit bar. These are anchored to bars, so they zoom and pan with the candles.")
+bool   showMarks  = input.bool(true,  "Entry / exit markers", group="Display")
+bool   showResult = input.bool(true,  "Label each exit with its result in R", group="Display",
+     tooltip="R is the trade's move divided by its own initial risk. +1R means it made exactly what it risked.")
 bool   showRegime = input.bool(true,  "Tint background by regime", group="Display")
-string cardSizeIn = input.string("Small", "Card text size", options=["Tiny", "Small", "Normal"], group="Display")
-string cardPosIn  = input.string("Top right", "Card position", options=["Top right", "Middle right", "Bottom right", "Top left", "Bottom left"], group="Display")
+
+color  upCol   = input.color(#26a69a, "Long colour",  group="Display", inline="col")
+color  dnCol   = input.color(#ef5350, "Short colour", group="Display", inline="col")
 
 bool isModeA = modeIn == MODE_A
 
@@ -896,7 +907,9 @@ float  exitPx  = exitStop ? (posBefore == 1 ? math.min(open, stopPx) : math.max(
 bool sellSig  = exitNow and posBefore == 1
 bool coverSig = exitNow and posBefore == -1
 
+var int heldAtExit = 0
 if exitNow
+    heldAtExit  := barsHeld
     posState    := 0
     barsHeld    := 0
     lastExitBar := bar_index
@@ -1026,69 +1039,215 @@ if buySig or shortSig
     array.push(entryBars, bar_index)
 
 // ════════════════════════════════════════════════════════════════════════════
-// DISPLAY
+// PRESENTATION
+//
+// Three layers, in the order the eye should read them:
+//
+//   1. TRADE ZONES — a risk box and a reward box drawn from the entry bar and
+//      extended to the exit bar. These are box/line objects anchored by
+//      bar_index, so they stretch and shrink with the candles as you zoom and
+//      pan. The previous build put the trade's numbers in a four-line text
+//      label instead, and labels are FIXED PIXEL SIZE: on a 5-minute chart one
+//      spanned about fifteen candles and visually detached from the bar it
+//      belonged to. Zones do not have that problem, and they show the whole
+//      trade at a glance — where it began, what it risked, what it was aiming
+//      at, and where it ended.
+//
+//   2. MARKERS — a small triangle at the entry, a cross at the exit, and a
+//      result in R. Small enough to mark a bar rather than cover it. The
+//      numbers live in the tooltip, so hovering gives detail without the
+//      chart carrying it permanently.
+//
+//   3. STATUS PANEL — a table, and therefore pinned to the viewport by
+//      construction; that is what a TradingView table is. It is the right
+//      home for "what is true right now", not for one specific trade. Grouped
+//      into sections so the two lines that matter — the state, and the reason
+//      there is no trade — are legible at a glance.
 // ════════════════════════════════════════════════════════════════════════════
-plotshape(buySig,   title="BUY",   style=shape.triangleup,   location=location.belowbar, color=color.new(color.green, 0),  size=size.small, text="BUY",   textcolor=color.new(color.green, 0))
-plotshape(shortSig, title="SHORT", style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0),    size=size.small, text="SHORT", textcolor=color.new(color.red, 0))
-plotshape(sellSig,  title="SELL",  style=shape.xcross,       location=location.abovebar, color=color.new(color.orange, 0), size=size.tiny,  text="SELL",  textcolor=color.new(color.orange, 0))
-plotshape(coverSig, title="COVER", style=shape.xcross,       location=location.belowbar, color=color.new(color.aqua, 0),   size=size.tiny,  text="COVER", textcolor=color.new(color.aqua, 0))
 
-plot(showLevels and posState != 0 ? stopPx : na,   "Stop",         color=color.new(color.red, 15),   style=plot.style_linebr, linewidth=1)
-plot(showLevels and posState != 0 ? targetPx : na, "Target",       color=color.new(color.green, 15), style=plot.style_linebr, linewidth=1)
-plot(showLevels and posState != 0 ? entryPx : na,  "Signal price", color=color.new(color.gray, 40),  style=plot.style_linebr, linewidth=1)
+// -- palette: TradingView's own dark-theme values, so it looks native --------
+color C_PANEL  = color.new(#131722, 8)
+color C_HEAD   = color.new(#1e222d, 0)
+color C_SECT   = color.new(#1e222d, 20)
+color C_BORDER = color.new(#2a2e39, 20)
+color C_LABEL  = #787b86
+color C_VALUE  = #d1d4dc
+color C_MUTED  = #5d606b
+color C_WARN   = #ff9800
+color C_GOOD   = #26a69a
 
-color regTint = domRegime == 0 ? color.new(color.green, 94) : domRegime == 1 ? color.new(color.blue, 94) : domRegime == 2 ? color.new(color.red, 92) : color.new(color.gray, 96)
+f_meter(float frac, int width) =>
+    // A small bar built by concatenation. str.repeat would be shorter, but its
+    // count argument's qualifier is not worth a compile round trip.
+    int n = int(math.round(f_clip(frac, 0.0, 1.0) * float(width)))
+    string outS = ""
+    for i = 0 to math.max(width, 1) - 1
+        outS := outS + (i < n ? "█" : "░")
+    outS
+
+f_rmult(int dir, float entry, float stop, float px) =>
+    // The result in units of the trade's OWN initial risk. +1R means it made
+    // exactly what it was risking; -1R is a clean stop-out. This is the only
+    // scale on which trades of different sizes and volatilities compare.
+    float risk = math.abs(entry - stop)
+    risk <= 0.0 or na(entry) or na(px) ? 0.0 : (dir > 0 ? px - entry : entry - px) / risk
+
+bool isEntryBar = buySig or shortSig
+bool isExitBar  = sellSig or coverSig
+
+// ── layer 1: trade zones, anchored to bars ─────────────────────────────────
+var box  zRisk   = na
+var box  zReward = na
+var line lEntry  = na
+
+if showTrades and isEntryBar
+    color side = buySig ? upCol : dnCol
+    zRisk := box.new(bar_index, math.max(close, planStop), bar_index + 1, math.min(close, planStop),
+         border_color=color.new(dnCol, 55), border_width=1, bgcolor=color.new(dnCol, 90))
+    zReward := box.new(bar_index, math.max(close, planTarget), bar_index + 1, math.min(close, planTarget),
+         border_color=color.new(upCol, 55), border_width=1, bgcolor=color.new(upCol, 91))
+    lEntry := line.new(bar_index, close, bar_index + 1, close,
+         color=color.new(side, 25), style=line.style_dashed, width=1)
+
+// Extend the open trade one bar at a time, and stop the moment it closes. The
+// zones are never redrawn, so scrolling back shows exactly the history that was
+// drawn as it happened.
+if showTrades and not na(zRisk) and (posState != 0 or isExitBar)
+    box.set_right(zRisk, bar_index + 1)
+    box.set_right(zReward, bar_index + 1)
+    line.set_x2(lEntry, bar_index + 1)
+
+// ── layer 2: markers ───────────────────────────────────────────────────────
+plotshape(showMarks and buySig,   title="BUY",   style=shape.triangleup,   location=location.belowbar, color=upCol,  size=size.tiny)
+plotshape(showMarks and shortSig, title="SHORT", style=shape.triangledown, location=location.abovebar, color=dnCol,  size=size.tiny)
+plotshape(showMarks and sellSig,  title="SELL",  style=shape.xcross,       location=location.abovebar, color=C_WARN, size=size.tiny)
+plotshape(showMarks and coverSig, title="COVER", style=shape.xcross,       location=location.belowbar, color=C_WARN, size=size.tiny)
+
+if showMarks and isEntryBar
+    label.new(bar_index, buySig ? low : high,
+         text=(buySig ? "LONG " : "SHORT ") + str.tostring(propConf, "#") + "%",
+         style=buySig ? label.style_label_up : label.style_label_down,
+         color=color.new(buySig ? upCol : dnCol, 10), textcolor=#ffffff,
+         size=size.tiny, textalign=text.align_center,
+         tooltip="entry " + str.tostring(close, format.mintick) +
+             "\nstop " + str.tostring(planStop, format.mintick) +
+             "\ntarget " + str.tostring(planTarget, format.mintick) +
+             "\nsetup " + (setupIdx == 1 ? "sweep reversal" : setupIdx == 2 ? "compression break" : setupIdx == 3 ? "range fade" : "continuation") +
+             "\nNOT market-validated")
+
+if showResult and isExitBar
+    float rr = f_rmult(posBefore, entryPx, stopPx, exitPx)
+    label.new(bar_index, sellSig ? high : low,
+         text=(rr >= 0.0 ? "+" : "") + str.tostring(rr, "#.##") + "R  " + exitWhy,
+         style=sellSig ? label.style_label_down : label.style_label_up,
+         color=color.new(rr >= 0.0 ? upCol : dnCol, 20), textcolor=#ffffff,
+         size=size.tiny, textalign=text.align_center,
+         tooltip="closed at " + str.tostring(exitPx, format.mintick) +
+             "\nentry " + str.tostring(entryPx, format.mintick) +
+             "\nheld " + str.tostring(heldAtExit) + " bars")
+
+// ── regime tint: present but quiet. It is context, not a signal. ───────────
+color regTint = domRegime == 0 ? color.new(upCol, 96) : domRegime == 1 ? color.new(#2962ff, 96) : domRegime == 2 ? color.new(dnCol, 95) : color.new(#787b86, 97)
 bgcolor(showRegime and featuresValid ? regTint : color(na), title="Regime tint")
 
-if showLabels and (buySig or shortSig)
-    label.new(bar_index, buySig ? low : high,
-         text=(buySig ? "BUY " : "SHORT ") + str.tostring(close, format.mintick) + "\nstop " + str.tostring(planStop, format.mintick) + "\ntarget " + str.tostring(planTarget, format.mintick) + "\nconf " + str.tostring(propConf, "#.#") + "%",
-         style=buySig ? label.style_label_up : label.style_label_down,
-         color=color.new(buySig ? color.green : color.red, 80),
-         textcolor=chart.fg_color, size=size.small)
+// ── layer 3: the status panel ──────────────────────────────────────────────
+f_kv(table t, int r, string k, string v, color vc, string sz) =>
+    table.cell(t, 0, r, " " + k, text_color=C_LABEL, text_size=sz, text_halign=text.align_left,  bgcolor=C_PANEL)
+    table.cell(t, 1, r, v + " ", text_color=vc,      text_size=sz, text_halign=text.align_right, bgcolor=C_PANEL)
 
-// -- diagnostics card: it always says WHY ------------------------------------
-f_row(table t, int r, string k, string v, color vc, string sz) =>
-    table.cell(t, 0, r, k, text_color=color.new(color.gray, 10), text_size=sz, text_halign=text.align_left)
-    table.cell(t, 1, r, v, text_color=vc, text_size=sz, text_halign=text.align_right)
+f_sec(table t, int r, string k, string sz) =>
+    table.cell(t, 0, r, " " + k, text_color=C_MUTED, text_size=sz, text_halign=text.align_left,  bgcolor=C_SECT)
+    table.cell(t, 1, r, "",      text_color=C_MUTED, text_size=sz, text_halign=text.align_right, bgcolor=C_SECT)
 
-var table card = table.new(cardPosIn == "Top right" ? position.top_right : cardPosIn == "Middle right" ? position.middle_right : cardPosIn == "Bottom right" ? position.bottom_right : cardPosIn == "Top left" ? position.top_left : position.bottom_left, 2, 20, border_width=1, frame_color=color.new(color.gray, 60))
+var table card = table.new(cardPosIn == "Top right" ? position.top_right : cardPosIn == "Middle right" ? position.middle_right : cardPosIn == "Bottom right" ? position.bottom_right : cardPosIn == "Top left" ? position.top_left : position.bottom_left, 2, 30, border_width=0, frame_width=1, frame_color=C_BORDER)
 
-if showCard and barstate.islast
-    string tsz = cardSizeIn == "Tiny" ? size.tiny : cardSizeIn == "Normal" ? size.normal : size.small
-    string headline = not featuresValid ? "WARMING UP" : buySig ? "BUY" : shortSig ? "SHORT" : sellSig ? "SELL" : coverSig ? "COVER" : posState == 1 ? "IN LONG" : posState == -1 ? "IN SHORT" : "NO TRADE"
-    color  hcol = buySig or posState == 1 ? color.new(color.green, 20) : shortSig or posState == -1 ? color.new(color.red, 20) : color.new(color.gray, 20)
+if cardModeIn != CARD_OFF and barstate.islast
+    bool   full  = cardModeIn == CARD_FULL
+    string tsz   = cardSizeIn == "Tiny" ? size.tiny : cardSizeIn == "Normal" ? size.normal : size.small
+    bool   inPos = posState != 0
+
+    string state = not featuresValid ? "WARMING UP" : buySig ? "BUY NOW" : shortSig ? "SHORT NOW" : sellSig ? "CLOSE LONG" : coverSig ? "CLOSE SHORT" : posState == 1 ? "HOLDING LONG" : posState == -1 ? "HOLDING SHORT" : "NO TRADE"
+    color stateCol = not featuresValid ? color.new(C_WARN, 40) : buySig or posState == 1 ? color.new(upCol, 10) : shortSig or posState == -1 ? color.new(dnCol, 10) : sellSig or coverSig ? color.new(C_WARN, 10) : color.new(#2a2e39, 0)
+
     string setupTxt = setupIdx == 1 ? "sweep reversal" : setupIdx == 2 ? "compression break" : setupIdx == 3 ? "range fade" : "continuation"
     string regTxt   = domRegime == 0 ? "Trending" : domRegime == 1 ? "Mean-reverting" : domRegime == 2 ? "Stress" : "Quiet"
-    string trTxt    = na(slopeT) ? "n/a" : (slopeT > 0.5 ? "up" : slopeT < -0.5 ? "down" : "flat") + ", t=" + str.tostring(slopeT, "#.#")
-    string moTxt    = moStrength > 0.3 ? (moDir > 0 ? "up, cheap displacement" : "down, cheap displacement") : "weak"
-    string vlTxt    = compression > 0.75 ? "compressed" : volRank > 0.85 ? "elevated" : volRank < 0.15 ? "very low" : "normal"
-    string lqTxt    = not hasVolume ? "no volume feed" : sweepAge <= 4 ? (sweepDir > 0 ? "low swept, reclaimed" : "high swept, rejected") : absorbing ? "absorbing" : "normal"
-    string stopTxt  = posState != 0 ? str.tostring(stopPx, format.mintick) : gateOpen ? str.tostring(planStop, format.mintick) : "n/a"
-    string tgtTxt   = posState != 0 ? str.tostring(targetPx, format.mintick) : gateOpen ? str.tostring(planTarget, format.mintick) : "n/a"
+    float  liveR    = inPos ? f_rmult(posState, entryPx, stopPx, close) : 0.0
 
-    table.clear(card, 0, 0, 1, 19)
-    table.cell(card, 0, 0, "TI-A", text_color=color.white, bgcolor=hcol, text_size=tsz)
-    table.cell(card, 1, 0, headline, text_color=color.white, bgcolor=hcol, text_size=tsz)
-    f_row(card, 1,  "Mode",          isModeA ? "A - frozen research model" : "B - observation, strict " + str.tostring(strictIn), color.white, tsz)
-    f_row(card, 2,  "Warm-up",       featuresValid ? "ready" : str.tostring(math.max(WARMUP_BARS - bar_index, 0)) + " bars left", featuresValid ? color.white : color.orange, tsz)
-    f_row(card, 3,  "Position",      posState == 1 ? "long, " + str.tostring(barsHeld) + " bars" : posState == -1 ? "short, " + str.tostring(barsHeld) + " bars" : "flat", color.white, tsz)
-    f_row(card, 4,  "Direction",     propDir > 0 ? "long" : propDir < 0 ? "short" : "none", color.white, tsz)
-    f_row(card, 5,  "Confidence",    str.tostring(propConf, "#.#") + "%", color.white, tsz)
-    f_row(card, 6,  "Regime",        regTxt + " " + str.tostring(regimeCommit * 100.0, "#") + "%", color.white, tsz)
-    f_row(card, 7,  "Regime hazard", str.tostring(hazard, "#.##"), hazard > (isModeA ? FM_RG_HAZ_MAX : bHazMax) ? color.orange : color.white, tsz)
-    f_row(card, 8,  "Setup",         setupTxt, color.white, tsz)
-    f_row(card, 9,  "Trend",         trTxt, color.white, tsz)
-    f_row(card, 10, "Momentum",      moTxt, color.white, tsz)
-    f_row(card, 11, "Volatility",    vlTxt + ", " + str.tostring(sigmaFcst * 100.0, "#.##") + "%/bar", color.white, tsz)
-    f_row(card, 12, "Liquidity",     lqTxt, color.white, tsz)
-    f_row(card, 13, "Higher TF",     na(htfSlopeT) ? "building" : htfSlopeT > 0.5 ? "up" : htfSlopeT < -0.5 ? "down" : "flat", color.white, tsz)
-    f_row(card, 14, "Evidence",      "|L| " + str.tostring(absL, "#.##") + ", breadth " + str.tostring(ebeAligned, "#.##"), color.white, tsz)
-    f_row(card, 15, "Edge - cost",   isModeA ? str.tostring(edgeLcb, "#.###") + " - " + str.tostring(roundTrip, "#.###") + " = " + str.tostring(evLcbNet, "#.###") + " sigma" : "not used in Mode B", isModeA and evLcbNet > FM_GATE_EVLCB ? color.new(color.green, 10) : color.white, tsz)
-    f_row(card, 16, "Gates passed",  str.tostring(gatesPassed) + " / " + str.tostring(gatesTotal), gatesPassed == gatesTotal ? color.new(color.green, 10) : color.white, tsz)
-    f_row(card, 17, "Stop / target", stopTxt + "  /  " + tgtTxt, color.white, tsz)
-    f_row(card, 18, "Why no trade",  gateOpen or posState != 0 ? "n/a" : vetoText, color.orange, tsz)
-    f_row(card, 19, "Model " + FM_HASH, FM_PLACEHOLDER ? "PLACEHOLDER - not exported" : "NOT market-validated", color.new(color.orange, 15), tsz)
+    table.clear(card, 0, 0, 1, 29)
+
+    // headline: the one line to read first
+    table.cell(card, 0, 0, " TI-A", text_color=#ffffff, text_size=tsz, text_halign=text.align_left, bgcolor=stateCol)
+    table.cell(card, 1, 0, state + " ", text_color=#ffffff, text_size=tsz, text_halign=text.align_right, bgcolor=stateCol)
+
+    int r = 1
+    if inPos
+        // ---- an open trade: everything needed to manage it -----------------
+        f_sec(card, r, "OPEN TRADE", tsz)
+        r += 1
+        f_kv(card, r, posState == 1 ? "Long from" : "Short from", str.tostring(entryPx, format.mintick), C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Stop — exit here", str.tostring(stopPx, format.mintick), dnCol, tsz)
+        r += 1
+        f_kv(card, r, "Target — exit here", str.tostring(targetPx, format.mintick), upCol, tsz)
+        r += 1
+        f_kv(card, r, "Open result", (liveR >= 0.0 ? "+" : "") + str.tostring(liveR, "#.##") + "R", liveR >= 0.0 ? upCol : dnCol, tsz)
+        r += 1
+        f_kv(card, r, "Held", str.tostring(barsHeld) + " of " + str.tostring(FM_MAX_HOLD) + " bars", C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Also closes on", "reversal, or " + str.tostring(FM_MAX_HOLD) + " bars", C_LABEL, tsz)
+        r += 1
+    else
+        // ---- flat: the proposal, and above all why it is not taken ---------
+        f_sec(card, r, "SIGNAL", tsz)
+        r += 1
+        f_kv(card, r, "Direction", propDir > 0 ? "long" : propDir < 0 ? "short" : "none", propDir > 0 ? upCol : propDir < 0 ? dnCol : C_MUTED, tsz)
+        r += 1
+        f_kv(card, r, "Confidence", f_meter((propConf - 50.0) / 45.0, 10) + " " + str.tostring(propConf, "#") + "%", C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Gates passed", f_meter(float(gatesPassed) / float(gatesTotal), 10) + " " + str.tostring(gatesPassed) + "/" + str.tostring(gatesTotal), gatesPassed == gatesTotal ? C_GOOD : C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Why no trade", gateOpen ? "ready" : vetoText, gateOpen ? C_GOOD : C_WARN, tsz)
+        r += 1
+        if gateOpen
+            f_kv(card, r, "Stop / target", str.tostring(planStop, format.mintick) + "  /  " + str.tostring(planTarget, format.mintick), C_VALUE, tsz)
+            r += 1
+
+    // ---- market context, always ------------------------------------------
+    f_sec(card, r, "MARKET", tsz)
+    r += 1
+    f_kv(card, r, "Regime", regTxt + "  " + str.tostring(regimeCommit * 100.0, "#") + "%", C_VALUE, tsz)
+    r += 1
+    f_kv(card, r, "Setup", setupTxt, C_VALUE, tsz)
+    r += 1
+    f_kv(card, r, "Trend", na(slopeT) ? "n/a" : (slopeT > 0.5 ? "up" : slopeT < -0.5 ? "down" : "flat") + "  t " + str.tostring(slopeT, "#.#"), C_VALUE, tsz)
+    r += 1
+
+    if full
+        f_kv(card, r, "Higher timeframe", na(htfSlopeT) ? "building" : htfSlopeT > 0.5 ? "up" : htfSlopeT < -0.5 ? "down" : "flat", C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Momentum", moStrength > 0.3 ? (moDir > 0 ? "up, cheap" : "down, cheap") : "weak", C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Volatility", (compression > 0.75 ? "compressed" : volRank > 0.85 ? "elevated" : volRank < 0.15 ? "very low" : "normal") + "  " + str.tostring(sigmaFcst * 100.0, "#.##") + "%/bar", C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Liquidity", not hasVolume ? "no volume feed" : sweepAge <= 4 ? (sweepDir > 0 ? "low swept, reclaimed" : "high swept, rejected") : absorbing ? "absorbing" : "normal", C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Regime hazard", str.tostring(hazard, "#.##"), hazard > (isModeA ? FM_RG_HAZ_MAX : bHazMax) ? C_WARN : C_VALUE, tsz)
+        r += 1
+
+        f_sec(card, r, "EVIDENCE", tsz)
+        r += 1
+        f_kv(card, r, "Log-odds", str.tostring(absL, "#.##"), C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Independent breadth", str.tostring(ebeAligned, "#.##"), C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Edge − cost", isModeA ? str.tostring(edgeLcb, "#.###") + " − " + str.tostring(roundTrip, "#.###") + " = " + str.tostring(evLcbNet, "#.###") : "not used in Mode B", isModeA and evLcbNet > FM_GATE_EVLCB ? C_GOOD : C_VALUE, tsz)
+        r += 1
+        f_kv(card, r, "Warm-up", featuresValid ? "ready" : str.tostring(math.max(WARMUP_BARS - bar_index, 0)) + " bars left", featuresValid ? C_VALUE : C_WARN, tsz)
+        r += 1
+
+    // ---- footer: the disclaimer never scrolls off -------------------------
+    table.cell(card, 0, r, isModeA ? " Mode A — frozen" : " Mode B — strict " + str.tostring(strictIn), text_color=C_MUTED, text_size=tsz, text_halign=text.align_left, bgcolor=C_HEAD)
+    table.cell(card, 1, r, (FM_PLACEHOLDER ? "PLACEHOLDER MODEL" : "NOT market-validated") + " ", text_color=C_WARN, text_size=tsz, text_halign=text.align_right, bgcolor=C_HEAD)
 
 // ════════════════════════════════════════════════════════════════════════════
 // ALERTS

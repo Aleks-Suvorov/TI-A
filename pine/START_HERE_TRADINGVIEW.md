@@ -53,26 +53,80 @@ what you should see:
 
 Within a few seconds of adding it to the chart:
 
-- **A panel in the top-right corner** with about twenty rows: Mode, Warm-up,
-  Position, Direction, Confidence, Regime, Regime hazard, Setup, Trend,
-  Momentum, Volatility, Liquidity, Higher TF, Evidence, Edge − cost, Gates
-  passed, Stop / target, and **Why no trade**.
-- **A faint background tint** that changes colour as the market's regime
-  changes — green for trending, blue for mean-reverting, red for stress, grey
-  for quiet. The chart is mostly grey, and that is correct: most bars are
-  unremarkable.
-- **Green `BUY` triangles below bars and red `SHORT` triangles above bars**,
-  each with a label giving the signal price, the stop, the target and a
-  confidence figure. Small orange `SELL` and cyan `COVER` crosses mark the
-  exits.
-- **On SPY daily over the last fifteen years, roughly 14 entries.** Not 14 per year — 14 in
-  total, across about fifteen years. This system abstains on purpose.
-- **The "Why no trade" row is almost never empty.** On any bar where nothing
-  is happening, it tells you the single reason: `quiet regime, p=0.71`,
-  `cooldown, 6 bars left`, `score 0.31 under strictness 0.45`, and so on.
+**A status panel in the top-right corner**, headed by a single coloured line
+that tells you the state in two words — `NO TRADE`, `BUY NOW`, `HOLDING LONG`,
+`CLOSE LONG`. Under it, grouped sections:
 
-If the top-right panel is there and "Why no trade" is giving you a reason, the
-script is working. That is the test.
+```
+ TI-A                        NO TRADE
+ SIGNAL
+ Direction                      short
+ Confidence         ███████░░░    74%
+ Gates passed       ████████░░   10/12
+ Why no trade      quiet regime, p=1.00
+ MARKET
+ Regime                   Quiet  100%
+ Setup                 sweep reversal
+ Trend                     up   t 1.1
+ Mode B — strict 3   NOT market-validated
+```
+
+The panel is pinned to the corner and does not move when you pan — it
+describes *now*, not a particular bar. Everything about a specific trade is
+drawn on the chart instead.
+
+**Trades are drawn as two shaded zones** running from the entry bar to the
+exit bar:
+
+- a **red zone** from entry down to the stop — what the trade is risking;
+- a **green zone** from entry up to the target — what it is aiming at;
+- a dashed line at the entry price.
+
+These are anchored to bars, so they stretch and shrink with the candles when
+you zoom and pan. A trade that is still open extends one bar at a time; when
+it closes, the zones stop and stay frozen where they ended. You can see the
+whole trade — start, risk, target, finish — without reading a number.
+
+**Markers**: a small triangle at the entry with a label like `LONG 84%`, and a
+cross at the exit with the result, e.g. `+1.62R  target hit` in green or
+`−1.00R  stop hit` in red. **R** is the trade's move divided by its own initial
+risk, so `+1R` means it made exactly what it was risking. Hover any marker for
+the exact prices.
+
+**A faint background tint** by regime — green trending, blue mean-reverting,
+red stress, grey quiet. Deliberately very subtle; it is context, not a signal.
+
+**On SPY daily over the last fifteen years, roughly 14 entries.** Not 14 per
+year — 14 in total. This system abstains on purpose.
+
+**The "Why no trade" row is almost never empty.** On any bar where nothing is
+happening it gives you the single binding reason: `quiet regime, p=0.71`,
+`cooldown, 6 bars left`, `score 0.31 under strictness 0.45`.
+
+If the panel is there and "Why no trade" is giving you a reason, the script is
+working. That is the test.
+
+### How do I know when to close a position?
+
+You do not have to work it out. While a trade is open the panel switches to an
+**OPEN TRADE** section that names every way it can end:
+
+```
+ TI-A                    HOLDING LONG
+ OPEN TRADE
+ Long from                   29502.00
+ Stop — exit here            29418.00
+ Target — exit here          29606.00
+ Open result                   +0.42R
+ Held                   3 of 30 bars
+ Also closes on   reversal, or 30 bars
+```
+
+So a position closes on exactly four things, and the panel shows all four:
+the **stop**, the **target**, the **bar limit** (30 bars), or a **reversal
+signal** — the engines flipping direction against the open trade. Whichever
+happens first, the chart prints `SELL` (closing a long) or `COVER` (closing a
+short) with the reason and the result in R, and the exit alert fires.
 
 ### How many signals to expect
 
@@ -152,7 +206,11 @@ thing this project exists to avoid.
 | **Cooldown bars after an exit** | Forced wait after any exit. Default 10. |
 | **Max entries per 100 bars** | Hard rate limit. Default 6. |
 | **Stop / target basis** | "Forecast volatility" (the model's own rule) or a plain ATR multiple, if you prefer stops you can reason about. |
-| **Card position / text size** | Move the panel if it covers your price action. |
+| **Status panel** | `Compact` (default), `Detailed` — adds every engine reading — or `Off`. |
+| **Panel position / text size** | Move or shrink the panel if it covers your price action. |
+| **Draw trades on the chart** | The red risk zone and green reward zone. On by default. |
+| **Label each exit with its result in R** | `+1.62R target hit`, `−1.00R stop hit`. |
+| **Long / short colour** | Change the palette to match your chart theme. |
 
 In the **strategy**, additionally: risk-per-trade sizing, a notional cap so a
 tight stop cannot silently build a leveraged position, and a date-range filter.
@@ -229,14 +287,14 @@ reaches zero:
   the exporter`, then the constants block in the file you pasted is a
   placeholder rather than a real export. Get a fresh copy of the file.
 
-### "The diagnostics card is blank, or missing"
+### "The status panel is blank, or missing"
 
-- The card only draws on the **last** bar of the chart. If you have scrolled
-  far back in history, scroll to the right-hand edge.
-- **"Show diagnostics card"** may be off in Settings ▸ Inputs ▸ Display.
-- It may be *behind* something. Change **Card position** to `Bottom left`.
-- If the card is there but every value reads `n/a`, the script is still in
-  warm-up.
+- The panel only draws on the **last** bar of the chart. If you have scrolled
+  far back in history, scroll to the right-hand edge. (The trade zones and
+  markers *are* drawn in history — those you can scroll back to.)
+- **Status panel** may be set to `Off` in Settings ▸ Inputs ▸ Display.
+- It may be *behind* something. Change **Panel position** to `Bottom left`.
+- If the panel is there but the header reads `WARMING UP`, it needs more bars.
 
 ### "Invalid timeframe / it breaks on weekly or monthly charts"
 
@@ -267,10 +325,11 @@ because "anomalous volume" is half of its definition.
 The heaviest part is a 7×7 matrix operation on every bar. If you hit a
 resource limit:
 
-- Turn off **"Label entries with stop and target"** — labels are the most
-  expensive thing drawn.
-- Turn off **"Tint background by regime"**.
-- Set **Card text size** to `Tiny`, or turn the card off once you trust it.
+- Turn off **Tint background by regime**.
+- Set **Status panel** to `Compact` rather than `Detailed`, or `Off` once you
+  trust it, and drop **Panel text size** to `Tiny`.
+- Turn off **Draw trades on the chart** — boxes and labels are the most
+  expensive things drawn.
 - Use a higher timeframe. A 1-minute chart with 20,000 bars is 20,000
   evaluations; the same period on hourly is 300.
 
@@ -280,7 +339,7 @@ rather than a wrong answer.
 
 ### "The Strategy Tester shows zero trades"
 
-- **Check the "Gates passed" row on the strategy's own card** — it counts 13
+- **Check the "Gates passed" row on the strategy's own panel** — it counts 13
   conditions, one more than the indicator (the date-range filter).
 - **The date range filter may be excluding everything.** It is off by default;
   if you turned it on, confirm the window actually overlaps your chart.

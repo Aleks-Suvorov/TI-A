@@ -173,15 +173,51 @@ def test_signals_are_emitted_only_on_confirmed_bars():
         )
 
 
-def test_table_rows_cover_every_diagnostic_field():
-    """The card must name at least fourteen fields including the veto reason."""
+def test_panel_names_every_diagnostic_field():
+    """The status panel must name at least fourteen fields, and say WHY.
+
+    Field names changed when the panel was redesigned into sections; what has
+    not changed is the requirement that the panel account for its own state
+    rather than just asserting one.
+    """
     text = (PINE / "TIA.pine").read_text()
-    required = ["Mode", "Warm-up", "Position", "Direction", "Confidence", "Regime",
-                "Regime hazard", "Setup", "Trend", "Momentum", "Volatility",
-                "Liquidity", "Higher TF", "Evidence", "Gates passed",
-                "Stop / target", "Why no trade"]
+    required = ["Direction", "Confidence", "Gates passed", "Why no trade",
+                "Regime", "Setup", "Trend", "Higher timeframe", "Momentum",
+                "Volatility", "Liquidity", "Regime hazard", "Log-odds",
+                "Independent breadth", "Warm-up", "Stop / target"]
     missing = [r for r in required if f'"{r}"' not in text]
-    assert not missing, f"diagnostics card is missing rows: {missing}"
+    assert not missing, f"status panel is missing rows: {missing}"
+    for section in ("OPEN TRADE", "SIGNAL", "MARKET", "EVIDENCE"):
+        assert f'"{section}"' in text, f"panel is missing the {section} section"
+
+
+def test_open_trade_panel_states_both_exits():
+    """A trader must be able to read the close condition off the panel.
+
+    "I cannot tell when to close" was the reported defect. While a position is
+    open the panel names the stop, the target, the bar limit and the reversal
+    exit explicitly, plus the live result in R.
+    """
+    text = (PINE / "TIA.pine").read_text()
+    for field in ("Stop — exit here", "Target — exit here", "Open result",
+                  "Held", "Also closes on"):
+        assert f'"{field}"' in text, f"open-trade panel is missing '{field}'"
+
+
+def test_trades_are_drawn_with_bar_anchored_objects():
+    """Trade geometry must scale with the candles, not float over them.
+
+    Fixed-pixel labels were the reported "signals do not lock onto candles"
+    problem: a four-line label spans ~15 candles at 5m and visually detaches
+    from its bar. Boxes and lines are anchored by bar_index and scale on zoom.
+    """
+    text = (PINE / "TIA.pine").read_text()
+    tail = text[text.index(CORE_END):]
+    for fn in ("box.new(", "line.new(", "box.set_right(", "line.set_x2("):
+        assert fn in tail, f"trade drawing is missing {fn}"
+    assert "max_boxes_count=" in text, (
+        "boxes are drawn but no max_boxes_count is declared"
+    )
 
 
 def test_all_six_alertconditions_exist():
