@@ -65,7 +65,7 @@ Within a few seconds of adding it to the chart:
   each with a label giving the signal price, the stop, the target and a
   confidence figure. Small orange `SELL` and cyan `COVER` crosses mark the
   exits.
-- **On SPY daily since 2010, roughly 14 entries.** Not 14 per year — 14 in
+- **On SPY daily over the last fifteen years, roughly 14 entries.** Not 14 per year — 14 in
   total, across about fifteen years. This system abstains on purpose.
 - **The "Why no trade" row is almost never empty.** On any bar where nothing
   is happening, it tells you the single reason: `quiet regime, p=0.71`,
@@ -84,18 +84,25 @@ history**, not per year:
 
 | Strictness | SPY | QQQ | IWM | GLD | TLT | EEM | Total |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 (loose) | 42 | 48 | 45 | 57 | 33 | 42 | 267 |
-| 2 | 37 | 46 | 38 | 45 | 31 | 41 | 238 |
-| **3 (default)** | **14** | **24** | **15** | **22** | **10** | **12** | **97** |
-| 4 | 6 | 10 | 1 | 6 | 2 | 4 | 29 |
+| 1 (loose) | 42 | 51 | 45 | 57 | 33 | 43 | 271 |
+| 2 | 36 | 46 | 38 | 48 | 29 | 41 | 238 |
+| **3 (default)** | **14** | **24** | **12** | **23** | **9** | **12** | **94** |
+| 4 | 6 | 10 | 1 | 7 | 1 | 5 | 30 |
 | 5 (strict) | 6 | 9 | 1 | 5 | 0 | 3 | 24 |
 
-**Hourly bars, ~2 years (~3,475 bars per symbol)** — 232 entries in total at
-strictness 3, so shorter timeframes are busier.
+Treat these as **indicative, ±a few**. The data vendor serves a *rolling*
+15-year window, so re-running the measurement a day later drops the oldest bar
+and adds a new one; every rolling statistic shifts by one bar and a handful of
+marginal signals flip. What is stable is the order of magnitude: tens of
+signals over fifteen years, not hundreds. (Fixed-seed synthetic runs, by
+contrast, reproduce exactly.)
 
-**Mode A across all six ETFs and all 22,600 daily bars: 5 entries.** One on
-SPY, three on QQQ, one on EEM, zero on the other three. On hourly bars, zero.
-That is not a malfunction — see the next section.
+**Hourly bars, ~2 years (~3,475 bars per symbol)** — roughly 230 entries in
+total at strictness 3, so shorter timeframes are busier.
+
+**Mode A across all six ETFs and all 22,600 daily bars: 4–5 entries.** One on
+SPY, two or three on QQQ, one on EEM, zero on the other three. On hourly bars,
+zero. That is not a malfunction — see the next section.
 
 ---
 

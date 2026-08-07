@@ -106,6 +106,41 @@ def test_no_request_security_anywhere():
         assert "request.security" not in code, f"{name} reintroduced request.security"
 
 
+def test_no_hyperbolic_math_builtins():
+    """Pine has `math.tan` but no `tanh`, `sinh` or `cosh`.
+
+    `math.tanh` shipped once. The direct error was CE10271 ("Could not find
+    function or function reference"), but the damage was indirect: every value
+    downstream of the missing call took type "unknown", so TradingView reported
+    seven errors, six of them CE10122 complaints about `str.format` arguments
+    a hundred lines away. The squash function is now `f_tanh`, which agrees
+    with the real tanh to one ULP.
+    """
+    for name in ("TIA.pine", "TIA_strategy.pine"):
+        code = "\n".join(
+            l.split("//")[0] for l in (PINE / name).read_text().splitlines()
+        )
+        for fn in ("math.tanh", "math.sinh", "math.cosh"):
+            assert fn not in code, f"{name} calls {fn}, which does not exist in Pine"
+        assert "f_tanh(" in code, f"{name}: the f_tanh replacement is missing"
+
+
+def test_alerts_avoid_str_format_overload_resolution():
+    """Alert bodies are concatenated, not formatted.
+
+    `str.format` resolves against a typed overload set, so a single upstream
+    type error becomes a cascade of confusing complaints about its arguments
+    rather than one error at the real cause. `+` on strings has no overloads.
+    """
+    for name in ("TIA.pine", "TIA_strategy.pine"):
+        code = "\n".join(
+            l.split("//")[0] for l in (PINE / name).read_text().splitlines()
+        )
+        assert "str.format" not in code, (
+            f"{name}: use string concatenation in alert bodies"
+        )
+
+
 def test_every_frozen_constant_used_is_declared():
     import re
     for name in ("TIA.pine", "TIA_strategy.pine"):

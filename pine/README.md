@@ -16,12 +16,12 @@ list of what you should see. This page is the engineering view.
 
 **A — Frozen Research Model.** The exported model through its original gate:
 90% posterior credence that expectancy net of modelled costs is positive.
-Measured over 22,626 daily bars of six ETFs it takes **5 trades**. That gate
+Measured over 22,626 daily bars of six ETFs it takes **4-5 trades**. That gate
 has deliberately not been relaxed. When it declines it prints the arithmetic.
 
 **B — Practical Observation Mode** (default). The same engines, the same
 regime posterior, gated on a reliability-weighted blend with a 1–5 strictness
-slider. 97 entries over the same 22,626 bars at default strictness.
+slider. ~94 entries over the same 22,626 bars at default strictness.
 
 Mode B fires on noise — about 21 entries per 4,000 bars of synthetic
 martingale, where Mode A fires zero or one. Mode B shows you what the engines
@@ -90,7 +90,7 @@ model nobody has.
 
 ```bash
 cd python
-python3 tools/pinelint.py                          # 16 static rule families, both files
+python3 tools/pinelint.py                          # 18 static rule families, both files
 PYTHONPATH=src python3 -m pytest tests/test_pine_port.py -q
 PYTHONPATH=src python3 tools/pinesim.py --real     # replay the port's arithmetic on real ETFs
 ```

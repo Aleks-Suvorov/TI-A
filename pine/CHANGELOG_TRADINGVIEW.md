@@ -76,8 +76,11 @@ a name bound to a literal and never reassigned.
 
 Every helper took untyped parameters, leaving Pine to infer a qualifier it
 cannot always get right at the call site. All 11 helpers now declare explicit
-types (`f_clip(float x, float lo, float hi)`). The linter reports untyped
-parameters as a note.
+types (`f_clip(float x, float lo, float hi)`). The linter now treats an
+untyped parameter as an **error**, not a style note: TradingView rejected
+`f_safediv(dollarVol, medVol, na)` against the old untyped signature with
+*CE10189 — the argument "d" should be explicitly typified*, so typing every
+parameter is what makes that whole class unreachable.
 
 ### C7. `//@version=6` not on the first line
 
@@ -85,6 +88,70 @@ It sat below a 30-line comment header. TradingView scans the opening lines for
 the version annotation and silently falls back to **Pine v1** when it does not
 find one, which produces a cascade of errors that name none of the real cause.
 Moved to line 1 in both files; a test asserts it.
+
+### C8. `math.tanh` does not exist in Pine — and failed silently
+
+Found by compiling on TradingView (NQ1!, 5m). Pine's `math` namespace has
+`tan` but **no hyperbolic functions at all** — no `tanh`, `sinh` or `cosh`.
+
+What made this expensive is not the error itself but its blast radius. The
+direct complaint was one line of CE10271 (*Could not find function or function
+reference 'math.tanh'*). But every value downstream of a missing call takes
+type **"unknown"**, and that propagated the whole length of the script:
+
+```
+math.tanh  ->  regScore / trScore / volScore  ->  bScore  ->  bDir
+           ->  propDir  ->  buySig, sellSig, planStop, planTarget, propConf
+```
+
+so TradingView reported **seven** errors, six of them CE10122 complaints about
+`str.format` arguments a hundred lines away in the alert block. The tell that
+they were all one cause: in `str.format(..., str.tostring(close, ...), ...)`
+argument 4 was accepted because `close` is a built-in, while arguments 5, 6 and
+7 were rejected because `planStop`, `planTarget` and `propConf` all trace back
+through `propDir`.
+
+Fixed with an `f_tanh` helper, `(e^{2z} - 1)/(e^{2z} + 1)` with the argument
+clipped to +/-20, which agrees with the true tanh to one ULP (max absolute
+error 2.2e-16 over x in [-100, 100]) — so no measured behaviour changed.
+
+Two guards were added so no invented built-in can ship again:
+
+* `pinelint.py` now carries the **complete v6 function set** for `math`, `str`,
+  `ta`, `array` and `table`, and rejects any call outside it with a
+  did-you-mean hint. Re-introducing `math.tanh` now fails locally with
+  *'math.tanh' is not a Pine v6 built-in; did you mean tan?*
+* the alert bodies were rewritten as **string concatenation** instead of
+  `str.format`. `str.format` resolves against a typed overload set, which is
+  what turned one root cause into six misleading errors; `+` on strings has no
+  overloads to resolve.
+
+### C9. Continuation-line indentation
+
+Pine distinguishes a wrapped line from a new local block purely by indentation:
+a continuation must **not** be indented by a multiple of four spaces. Getting
+this wrong produces an error pointing somewhere unrelated. `pinelint.py` now
+checks it.
+
+### C10. `for` counts downward when the end value is below the start
+
+Found while auditing for the next compile round, not by the compiler. Pine's
+`for a to b` **decrements** when `b < a`. So the ordinary-looking
+
+```pine
+for k = 0 to array.size(BUCKET_EDGE) - 1
+```
+
+does not "do nothing" on an empty array — it becomes `for k = 0 to -1` and
+iterates `k = 0`, then `k = -1`, reading index 0 of an empty array and raising
+a runtime error on the chart. Both `array.size`-bounded loops in the port are
+now wrapped in an explicit size guard, with the reason written next to them.
+
+This one never fired, because the arrays are populated from the generated
+constants block and are never empty in practice. It would have fired on the one
+occasion it mattered: a malformed or truncated frozen-model block, which is
+exactly when a clear "model failed to load" message is wanted instead of an
+opaque index error.
 
 ---
 
@@ -173,14 +240,14 @@ trading a model nobody has.
 **Mode A — Frozen Research Model** evaluates the exported model through its
 original gate: expectancy's 90% lower credible bound, minus modelled costs,
 must exceed 0.05σ. **This gate has not been relaxed.** Measured over 22,626
-daily bars of six ETFs it produced **5 entries**; over 20,850 hourly bars,
+daily bars of six ETFs it produced **4-5 entries**; over 20,850 hourly bars,
 zero. When it declines, the card prints the arithmetic
 (`edge 0.169 - cost 0.176 = -0.007 sigma, under the 0.05 gate`) so the refusal
 is legible rather than mysterious.
 
 **Mode B — Practical Observation Mode** (default) runs the same engines and
 the same regime posterior, gated on a reliability-weighted blend with a 1–5
-strictness slider. At default strictness it produced 97 entries over the same
+strictness slider. At default strictness it produced ~94 entries over the same
 22,626 daily bars.
 
 Mode B is **not** a validated strategy, and one measurement makes that
@@ -257,8 +324,8 @@ What was actually done:
 
 | Check | Result |
 | --- | --- |
-| `python/tools/pinelint.py` — 16 static rule families over both files | **0 problems** |
-| `python/tests/test_pine_port.py` — 21 regression checks | **21 passed** |
+| `python/tools/pinelint.py` — 18 static rule families over both files | **0 problems** |
+| `python/tests/test_pine_port.py` — 24 regression checks | **24 passed** |
 | Shared core byte-identical between indicator and strategy | asserted by test |
 | `FM_HASH` matches `pine/frozen_model.json` | asserted by test |
 | No `request.security` in code (comments excluded) | asserted by test |

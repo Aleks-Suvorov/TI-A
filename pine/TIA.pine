@@ -233,6 +233,17 @@ f_slog(float x) =>
 f_logistic(float x) =>
     1.0 / (1.0 + math.exp(-f_clip(x, -60.0, 60.0)))
 
+f_tanh(float x) =>
+    // Pine's math namespace has tan but NOT tanh, sinh or cosh. Calling
+    // math.tanh compiles to CE10271 "Could not find function or function
+    // reference" -- and far worse than a clean error, every downstream value
+    // silently becomes type "unknown", so the real failure surfaces as a pile
+    // of unrelated-looking CE10122 complaints about str.format arguments.
+    // Clipping at +/-20 reaches +/-1 to full double precision.
+    float z = f_clip(x, -20.0, 20.0)
+    float ex = math.exp(2.0 * z)
+    (ex - 1.0) / (ex + 1.0)
+
 f_ewmaAlpha(float halflife) =>
     1.0 - math.pow(0.5, 1.0 / math.max(halflife, 0.5))
 
@@ -240,9 +251,13 @@ f_parseFloats(string csv) =>
     float[] out = array.new_float(0)
     if csv != ""
         string[] parts = str.split(csv, ",")
-        for i = 0 to array.size(parts) - 1
-            float v = str.tonumber(array.get(parts, i))
-            array.push(out, na(v) ? 0.0 : v)
+        // Size guard: Pine's `for a to b` counts DOWNWARD when b < a, so on an
+        // empty array `0 to size-1` becomes `0 to -1` and reads index 0 out of
+        // bounds instead of doing nothing.
+        if array.size(parts) > 0
+            for i = 0 to array.size(parts) - 1
+                float v = str.tonumber(array.get(parts, i))
+                array.push(out, na(v) ? 0.0 : v)
     out
 
 f_normPpf(float p) =>
@@ -672,11 +687,11 @@ float regimeCommit = math.max(math.max(pTrend, pRevert), math.max(pStress, pQuie
 // bites: a mean-reversion engine is not merely wrong in a trending regime, it
 // is unreliable, and those are different things.
 // ════════════════════════════════════════════════════════════════════════════
-float regScore = f_clip(0.5 * (pTrend * math.tanh(nz(slopeT, 0.0) / 2.0) + pRevert * (0.5 - nz(rangePos, 0.5)) * 2.0), -1.0, 1.0)
+float regScore = f_clip(0.5 * (pTrend * f_tanh(nz(slopeT, 0.0) / 2.0) + pRevert * (0.5 - nz(rangePos, 0.5)) * 2.0), -1.0, 1.0)
 float regRel   = f_clip(regimeCommit * (1.0 - hazard), 0.0, 1.0)
 
 float trAgree = (close > nz(close[5], close) ? 1.0 : -1.0) + (close > nz(close[22], close) ? 1.0 : -1.0) + (close > nz(close[66], close) ? 1.0 : -1.0)
-float trScore = f_clip(0.45 * math.tanh(nz(slopeT, 0.0) / 2.0) + 0.25 * trAgree / 3.0 + 0.30 * math.tanh(nz(htfSlopeT, 0.0) / 2.0), -1.0, 1.0)
+float trScore = f_clip(0.45 * f_tanh(nz(slopeT, 0.0) / 2.0) + 0.25 * trAgree / 3.0 + 0.30 * f_tanh(nz(htfSlopeT, 0.0) / 2.0), -1.0, 1.0)
 float persist = f_clip(0.5 + nz(vrZ, 0.0) / 4.0, 0.0, 1.0)
 bool  tfAgreeOk = na(htfSlopeT) or na(slopeT) or (htfSlopeT >= 0.0) == (slopeT >= 0.0)
 float trRel   = f_clip((0.25 + 0.75 * pTrend) * (0.15 + 0.85 * persist) * (0.45 + 0.55 * efficiency) * (tfAgreeOk ? 1.0 : 0.45) * (1.0 - 0.6 * pRevert), 0.0, 1.0)
@@ -695,7 +710,7 @@ bool  liqEvent   = sweepScore != 0.0 or absorbing
 float liqRel     = liqEvent ? f_clip((0.30 + 0.70 * math.abs(liqScore)) * (0.40 + 0.60 * (pRevert + 0.6 * pStress)) * (1.0 - 0.35 * pTrend), 0.0, 1.0) : hasVolume ? 0.35 : 0.10
 
 float volFav   = volRank >= 0.25 and volRank <= 0.80 ? 1.0 : f_clip(1.0 - 2.0 * (volRank < 0.25 ? (0.25 - volRank) / 0.55 : (volRank - 0.80) / 0.55), -1.0, 1.0)
-float volScore = volRatio > 1.15 and math.abs(dNorm) > 0.5 ? f_clip(0.35 * math.tanh(dNorm / 2.0), -0.4, 0.4) : 0.0
+float volScore = volRatio > 1.15 and math.abs(dNorm) > 0.5 ? f_clip(0.35 * f_tanh(dNorm / 2.0), -0.4, 0.4) : 0.0
 float volRel   = f_clip((0.35 + 0.45 * f_clip((volFav + 1.0) / 2.0, 0.0, 1.0)) * (1.0 - 0.4 * pStress), 0.0, 1.0)
 
 float stPos    = na(rangePos) ? 0.0 : 2.0 * rangePos - 1.0
@@ -789,9 +804,14 @@ float pSuccess = direction >= 0 ? pUp : 1.0 - pUp
 int   setupIdx = sweepAge <= 4 and sweepDir != 0 ? 1 : compression > 0.7 and volRatio > 1.1 ? 2 : pRevert > pTrend ? 3 : 0
 float absL = math.abs(logOdds)
 int   bucketIdx = 0
-for k = 0 to array.size(BUCKET_EDGE) - 1
-    if absL >= array.get(BUCKET_EDGE, k)
-        bucketIdx += 1
+// The size guard is load-bearing, not defensive noise. Pine's `for a to b`
+// counts DOWNWARD when b < a, so on an empty array `0 to array.size(x) - 1`
+// becomes `0 to -1` and iterates k = 0, then k = -1 -- an out-of-bounds
+// array.get and a runtime error, where the intent was to do nothing at all.
+if array.size(BUCKET_EDGE) > 0
+    for k = 0 to array.size(BUCKET_EDGE) - 1
+        if absL >= array.get(BUCKET_EDGE, k)
+            bucketIdx += 1
 bucketIdx := math.min(bucketIdx, FM_EB_NBUCKET - 1)
 int  cellIdx = (domRegime * FM_EB_NSETUP + setupIdx) * FM_EB_NBUCKET + bucketIdx
 bool cellOk  = bookOk and cellIdx >= 0 and cellIdx < array.size(EDGE_MU)
@@ -1082,15 +1102,21 @@ alertcondition(coverSig,            title="TI-A COVER",     message="TI-A COVER 
 alertcondition(buySig or shortSig,  title="TI-A any ENTRY", message="TI-A ENTRY {{ticker}} {{interval}} @ {{close}}")
 alertcondition(sellSig or coverSig, title="TI-A any EXIT",  message="TI-A EXIT {{ticker}} {{interval}} @ {{close}}")
 
+// Built by concatenation rather than str.format. str.format resolves against a
+// typed overload set, so one upstream type error turns into a cascade of
+// confusing complaints about its arguments; `+` on strings has no overloads to
+// resolve. The ternaries need their parentheses -- `?:` binds looser than `+`.
 if buySig or shortSig
-    alert(str.format("TI-A {0} | {1} {2} | signal {3} | stop {4} | target {5} | confidence {6}% | mode {7} | NOT VALIDATED",
-         buySig ? "BUY" : "SHORT", syminfo.ticker, timeframe.period,
-         str.tostring(close, format.mintick), str.tostring(planStop, format.mintick),
-         str.tostring(planTarget, format.mintick), str.tostring(propConf, "#.#"),
-         isModeA ? "A-frozen" : "B-observation"), alert.freq_once_per_bar_close)
+    alert("TI-A " + (buySig ? "BUY" : "SHORT") + " | " + syminfo.ticker + " " + timeframe.period +
+         " | signal " + str.tostring(close, format.mintick) +
+         " | stop " + str.tostring(planStop, format.mintick) +
+         " | target " + str.tostring(planTarget, format.mintick) +
+         " | confidence " + str.tostring(propConf, "#.#") + "%" +
+         " | mode " + (isModeA ? "A-frozen" : "B-observation") +
+         " | NOT VALIDATED", alert.freq_once_per_bar_close)
 
 if sellSig or coverSig
-    alert(str.format("TI-A {0} | {1} {2} | exit {3} | reason {4} | mode {5}",
-         sellSig ? "SELL" : "COVER", syminfo.ticker, timeframe.period,
-         str.tostring(exitPx, format.mintick), exitWhy,
-         isModeA ? "A-frozen" : "B-observation"), alert.freq_once_per_bar_close)
+    alert("TI-A " + (sellSig ? "SELL" : "COVER") + " | " + syminfo.ticker + " " + timeframe.period +
+         " | exit " + str.tostring(exitPx, format.mintick) +
+         " | reason " + exitWhy +
+         " | mode " + (isModeA ? "A-frozen" : "B-observation"), alert.freq_once_per_bar_close)

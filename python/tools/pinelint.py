@@ -20,8 +20,13 @@ catching a real defect in this repository's history):
   7.  Series-qualified lengths in the TA calls that demand ``simple int``.
       ``math.sum(x, n)`` with a mutable ``n`` is the classic one.
   8.  Functions used before they are defined -- Pine resolves top-down.
-  9.  Untyped function parameters, reported as a note. Explicit types stop
-      Pine from having to infer a qualifier it cannot always get right.
+  9.  Untyped function parameters, and ``na`` passed to one. This is a hard
+      error, not a style note: TradingView rejected
+      ``f_safediv(dollarVol, medVol, na)`` against ``f_safediv(a, b, d)`` with
+      *CE10189 -- Cannot call "f_safediv" with "na" as a value for a
+      non-typified argument. The argument "d" should be explicitly typified.*
+      Typing every parameter is what makes that class unreachable.
+  9b. Argument-count mismatches on calls to user-defined functions.
   10. Table cell indices beyond the declared table size -- a runtime error
       TradingView reports only once the script is on a chart.
   11. ``plot``/``plotshape``/``bgcolor``/``alertcondition``/``hline``/
@@ -72,6 +77,59 @@ SIMPLE_LEN_CALLS = {
     "ta.median": 1, "ta.mode": 1, "ta.highest": 1, "ta.lowest": 1, "ta.atr": 0,
     "ta.change": 1, "ta.mom": 1, "ta.roc": 1, "ta.correlation": 2, "ta.linreg": 1,
     "ta.cci": 1, "ta.rsi": 1, "ta.wpr": 0, "ta.cmo": 1, "ta.dev": 1,
+}
+
+#: The complete v6 function set for the namespaces this port calls into.
+#: `math.tanh` shipped once and cost a compile cycle: Pine has `math.tan` but
+#: no hyperbolic functions at all. Worse than the CE10271 it raises, every
+#: value downstream of the missing call becomes type "unknown", so the visible
+#: failure was seven CE10122 errors about `str.format` arguments in a totally
+#: different part of the file. A misspelt or imagined built-in must never again
+#: reach TradingView.
+BUILTINS: dict[str, set[str]] = {
+    "math": {
+        "abs", "acos", "asin", "atan", "avg", "ceil", "cos", "exp", "floor",
+        "log", "log10", "max", "min", "pow", "random", "round",
+        "round_to_mintick", "sign", "sin", "sqrt", "sum", "tan", "todegrees",
+        "toradians",
+    },
+    "str": {
+        "contains", "endswith", "format", "format_time", "length", "lower",
+        "match", "pos", "repeat", "replace", "replace_all", "split",
+        "startswith", "substring", "tonumber", "tostring", "trim", "upper",
+    },
+    "ta": {
+        "alma", "atr", "barssince", "bb", "bbw", "cci", "change", "cmo", "cog",
+        "correlation", "cross", "crossover", "crossunder", "cum", "dev", "dmi",
+        "ema", "falling", "highest", "highestbars", "hma", "kc", "kcw",
+        "linreg", "lowest", "lowestbars", "macd", "max", "median", "mfi", "min",
+        "mode", "mom", "percentile_linear_interpolation",
+        "percentile_nearest_rank", "percentrank", "pivot_point_levels",
+        "pivothigh", "pivotlow", "range", "rising", "rma", "roc", "rsi", "sar",
+        "sma", "stdev", "stoch", "supertrend", "swma", "tr", "tsi", "valuewhen",
+        "variance", "vwap", "vwma", "wma", "wpr",
+    },
+    "array": {
+        "abs", "avg", "binary_search", "binary_search_leftmost",
+        "binary_search_rightmost", "clear", "concat", "copy", "covariance",
+        "every", "fill", "first", "from", "get", "includes", "indexof",
+        "insert", "join", "last", "lastindexof", "max", "median", "min", "mode",
+        "new", "new_bool", "new_box", "new_color", "new_float", "new_int",
+        "new_label", "new_line", "new_linefill", "new_string", "new_table",
+        "new_type", "percentile_linear_interpolation",
+        "percentile_nearest_rank", "percentrank", "pop", "push", "range",
+        "remove", "reverse", "set", "shift", "size", "slice", "some", "sort",
+        "sort_indices", "standardize", "stdev", "sum", "unshift", "variance",
+    },
+    "table": {
+        "cell", "cell_set_bgcolor", "cell_set_height", "cell_set_text",
+        "cell_set_text_color", "cell_set_text_font_family",
+        "cell_set_text_formatting", "cell_set_text_halign",
+        "cell_set_text_size", "cell_set_text_valign", "cell_set_tooltip",
+        "cell_set_width", "clear", "delete", "merge_cells", "new",
+        "set_bgcolor", "set_border_color", "set_border_width",
+        "set_frame_color", "set_frame_width", "set_position",
+    },
 }
 
 #: Constructs Pine only accepts at the outermost scope.
@@ -168,6 +226,9 @@ def check_file(path: Path) -> None:
     reassigned: set[str] = set()
     declared: set[str] = set()
     functions: dict[str, int] = {}
+    fn_params: dict[int, list[str]] = {}
+    #: function name -> one "is this parameter explicitly typed?" flag per param
+    fn_sig: dict[str, list[bool]] = {}
     for n, c in enumerate(code_lines, 1):
         m = re.match(r"^(?:int|float)?\s*(\w+)\s*=\s*(-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?)\s*$", c.strip())
         if m and not c.startswith((" ", "\t")):
@@ -200,6 +261,15 @@ def check_file(path: Path) -> None:
         if opened > 0:
             # A continuation line of a wrapped call. Named arguments there look
             # exactly like assignments and are not.
+            #
+            # Pine tells a continuation from a new local block purely by
+            # indentation: a continuation must NOT be indented by a multiple of
+            # four spaces, because those open a block. Get it wrong and the
+            # compiler reports something unrelated several lines away.
+            if indent % 4 == 0 and indent > 0:
+                err(path, n, f"continuation line is indented {indent} spaces, a "
+                             f"multiple of 4; Pine reads that as a new local block "
+                             f"(use 5, 6, 7, 9, ... instead)", line)
             continue
 
         # --- comma-separated multiple assignment ----------------------------
@@ -236,14 +306,22 @@ def check_file(path: Path) -> None:
             functions[fm.group(1)] = n
             declared.add(fm.group(1))
             raw_params = [p.strip() for p in fm.group(2).split(",") if p.strip()]
+            typed: list[bool] = []
             for p in raw_params:
                 parts = p.split()
                 name = parts[-1].split("=")[0].strip()
                 declared.add(name)
+                is_typed = len(parts) > 1 or "=" in p
+                typed.append(is_typed)
                 if name in RESERVED:
                     err(path, n, f"parameter '{name}' shadows a Pine built-in namespace", line)
-                if len(parts) == 1 and "=" not in p:
-                    NOTES.append(f"{path.name}:{n}: parameter '{name}' has no explicit type")
+                if not is_typed:
+                    err(path, n,
+                        f"parameter '{name}' has no explicit type. Pine rejects a call "
+                        f"that passes `na` to an untyped parameter (CE10189); type it "
+                        f"(e.g. `float {name}`)", line)
+            fn_params[n] = [p.split()[-1].split("=")[0].strip() for p in raw_params]
+            fn_sig[fm.group(1)] = typed
 
         # --- for-loop counters are declarations too --------------------------
         fl = re.match(r"^\s*for\s+(\w+)\s*=", c)
@@ -295,6 +373,15 @@ def check_file(path: Path) -> None:
                     continue                       # input.int is simple int
                 err(path, n, f"{fname} length argument '{a}' may not be a simple int "
                              f"(Pine requires a literal, an input, or a const)", c)
+
+    # --- every namespaced call must be a real Pine v6 built-in ---------------
+    for n, c in enumerate(code_lines, 1):
+        for m in re.finditer(r"\b(math|str|ta|array|table)\.([a-z_0-9]+)\s*\(", c):
+            ns, fn = m.group(1), m.group(2)
+            if fn not in BUILTINS[ns]:
+                near = sorted(x for x in BUILTINS[ns] if x.startswith(fn[:3]))
+                hint = f"; did you mean {', '.join(near[:3])}?" if near else ""
+                err(path, n, f"'{ns}.{fn}' is not a Pine v6 built-in{hint}", raw[n - 1])
 
     # --- functions must be defined before first use --------------------------
     for name, defline in functions.items():

@@ -29,27 +29,29 @@ All notable changes, most recent first. Every entry that touched a
   through a loop-variable index: a performance trap and a `max_bars_back`
   runtime-error risk. Replaced with ring-buffered pattern counts.
 - **Added two operating modes.** Mode A evaluates the exported model through
-  its original, unrelaxed gate — 5 trades across 22,626 daily bars of six
+  its original, unrelaxed gate — 4-5 trades across 22,626 daily bars of six
   ETFs, and it prints the edge-minus-cost arithmetic when it declines. Mode B
   gates the same engines on a reliability-weighted blend with a strictness
-  slider, giving 97 entries over the same bars so a chart can be observed.
+  slider, giving ~94 entries over the same bars so a chart can be observed.
   Mode B is recorded, in both script headers and the docs, as firing ~21 times
   per 4,000 bars of synthetic martingale where Mode A fires 0–1: it shows what
   the engines react to and is not evidence that those reactions are tradeable.
 - **The two scripts share a byte-identical core.** Delimited by
   `BEGIN/END SHARED CORE` and enforced by a test, so the strategy cannot trade
   something the indicator does not paint.
-- **Strengthened `tools/pinelint.py`** from 8 rule families to 16: simple-int
+- **Strengthened `tools/pinelint.py`** from 8 rule families to 18: simple-int
   lengths, use-before-definition, undeclared `:=` targets, table index bounds,
   global-only constructs in local scope, history depth against
-  `max_bars_back`, untyped parameters. Its `request.security` repaint rule was
+  `max_bars_back`, untyped parameters, continuation-line indentation, and a
+  whitelist of every real Pine v6 `math`/`str`/`ta`/`array`/`table`
+  function. Its `request.security` repaint rule was
   itself scanning comments and firing on the comment that says the script
   contains none; it now scans code only.
 - **Added `tools/pinesim.py`** — a transliteration of the Pine arithmetic into
   Python, driven by the same `frozen_model.json`, so signal frequency and
   runtime safety can be measured without a Pine compiler. It does not prove
   the files compile, and says so.
-- **Added `python/tests/test_pine_port.py`** (21 checks) and the two
+- **Added `python/tests/test_pine_port.py`** (24 checks) and the two
   TradingView documents: `pine/START_HERE_TRADINGVIEW.md` (install, smoke
   test, expected behaviour, eight troubleshooting situations) and
   `pine/CHANGELOG_TRADINGVIEW.md` (every defect, every omission, and a manual
