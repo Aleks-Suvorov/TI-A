@@ -288,6 +288,59 @@ to 95–97% transparency; it is context, not a signal.
 The disclaimer row is pinned to the footer of both modes and cannot be
 scrolled away.
 
+### U4. Panel width changed on every bar
+
+The status panel is a two-column table, and TradingView sizes a table's columns
+to its content. The "Why no trade" value is the longest string in it and it
+changes every bar, so the whole panel grew and shrank as the reason changed.
+The Mode A reason was the worst offender at 90 characters of literal text
+before any numbers — wide enough to run into the price scale.
+
+Every veto string was shortened to fit one line at a stable width; the Mode A
+reason went from
+
+```
+edge 0.169 - cost 0.176 = -0.007 sigma, under the 0.05 gate
+```
+
+to `edge-cost -0.007, need > 0.05`, with the full arithmetic still spelled out
+in the EVIDENCE section where it has room and does not move.
+
+### U5. The confidence bar contradicted its own number
+
+`Confidence  ███████░░░  74%` — the bar spans 50% (a coin flip) to 95%, so 74%
+is legitimately a little over half a bar. Correct, and unreadable: a reader
+sees 74 next to a half-full bar and concludes one of them is wrong.
+
+Fixed by putting the **number first and the bar second**, so the number leads
+and the bar is texture rather than a competing claim, and by attaching a cell
+tooltip stating the scale — including that it is not a probability of profit.
+The gates bar keeps its ordering for the same reason: 10/12 maps to the bar
+exactly, so there is nothing to explain.
+
+### U6. Labels sat on top of their own markers
+
+The entry label was anchored at the bar's `low`, and the entry triangle is
+drawn at `location.belowbar` — the same place. Both now clear each other by
+0.6 ATR, which is the only offset that behaves the same on an index future and
+a currency pair.
+
+Exit labels also shortened their reason to one word (`stop`, `target`, `time`,
+`reversal`); the full sentence still goes in the alert, where there is room for
+it and no layout to disturb.
+
+### U7. Nothing showed what the chart had actually done
+
+Added a `THIS CHART ONLY — NOT EVIDENCE` section to the detailed panel: closed
+trades, win rate, average result in R, and — in the same block, not a footnote
+— the sample size against the ~400 trades the pre-registration requires.
+
+This is deliberately framed. Realized statistics on one chart are the most
+seductive number in the whole interface and the one most likely to produce the
+failure `docs/08-FAILURE-MODES.md` ranks first, so the panel prints the number
+and the reason not to trust it in adjacent rows rather than leaving the second
+half to the documentation.
+
 ---
 
 ## Part 3 — what is new

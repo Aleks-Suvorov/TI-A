@@ -938,7 +938,7 @@ gatesTotal += 1
 if g1
     gatesPassed += 1
 else if vetoText == ""
-    vetoText := modelOk ? "warming up, " + str.tostring(math.max(WARMUP_BARS - bar_index, 0)) + " bars left" : "frozen model failed to load; re-run the exporter"
+    vetoText := modelOk ? "warming up, " + str.tostring(math.max(WARMUP_BARS - bar_index, 0)) + " bars left" : "model failed to load"
 
 bool g2 = propDir != 0
 gatesTotal += 1
@@ -966,35 +966,35 @@ gatesTotal += 1
 if g5
     gatesPassed += 1
 else if vetoText == ""
-    vetoText := "regime in transition, hazard " + str.tostring(hazard, "#.##")
+    vetoText := "regime shifting, hazard " + str.tostring(hazard, "#.##")
 
 bool g6 = isModeA ? evLcbNet > FM_GATE_EVLCB : math.abs(bScore) >= bScoreMin
 gatesTotal += 1
 if g6
     gatesPassed += 1
 else if vetoText == ""
-    vetoText := isModeA ? "edge " + str.tostring(edgeLcb, "#.###") + " - cost " + str.tostring(roundTrip, "#.###") + " = " + str.tostring(evLcbNet, "#.###") + " sigma, under the " + str.tostring(FM_GATE_EVLCB, "#.##") + " gate" : "score " + str.tostring(math.abs(bScore), "#.##") + " under strictness " + str.tostring(bScoreMin, "#.##")
+    vetoText := isModeA ? "edge-cost " + str.tostring(evLcbNet, "#.###") + ", need > " + str.tostring(FM_GATE_EVLCB, "#.##") : "score " + str.tostring(math.abs(bScore), "#.##") + ", need " + str.tostring(bScoreMin, "#.##")
 
 bool g7 = isModeA ? pSuccess >= FM_GATE_PMIN : bConf >= 55.0
 gatesTotal += 1
 if g7
     gatesPassed += 1
 else if vetoText == ""
-    vetoText := "confidence " + str.tostring(propConf, "#.#") + "% under the floor"
+    vetoText := "confidence " + str.tostring(propConf, "#.#") + "% too low"
 
 bool g8 = ebeAligned >= (isModeA ? FM_GATE_EBEMIN : bBreadth)
 gatesTotal += 1
 if g8
     gatesPassed += 1
 else if vetoText == ""
-    vetoText := "evidence breadth " + str.tostring(ebeAligned, "#.##") + " under " + str.tostring(isModeA ? FM_GATE_EBEMIN : bBreadth, "#.##")
+    vetoText := "breadth " + str.tostring(ebeAligned, "#.##") + ", need " + str.tostring(isModeA ? FM_GATE_EBEMIN : bBreadth, "#.##")
 
 bool g9 = not useHtfConf or na(htfSlopeT) or propDir == 0 or (propDir > 0 ? htfSlopeT > -0.5 : htfSlopeT < 0.5)
 gatesTotal += 1
 if g9
     gatesPassed += 1
 else if vetoText == ""
-    vetoText := "higher timeframe disagrees, t=" + str.tostring(htfSlopeT, "#.#")
+    vetoText := "higher timeframe disagrees"
 
 bool g10 = inSession
 gatesTotal += 1
@@ -1008,7 +1008,7 @@ gatesTotal += 1
 if g11
     gatesPassed += 1
 else if vetoText == ""
-    vetoText := not rateOk ? "rate limit, " + str.tostring(maxPer100) + " entries per 100 bars" : not submitOk ? "an order is still filling" : "cooldown, " + str.tostring(math.max(math.max(cooldownIn, 1) - (bar_index - lastExitBar), 0)) + " bars left"
+    vetoText := not rateOk ? "rate limit, " + str.tostring(maxPer100) + " per 100 bars" : not submitOk ? "an order is still filling" : "cooldown, " + str.tostring(math.max(math.max(cooldownIn, 1) - (bar_index - lastExitBar), 0)) + " bars left"
 
 bool g12 = posState == 0
 gatesTotal += 1
@@ -1133,6 +1133,10 @@ f_kv(table t, int r, string k, string v, color vc, string sz) =>
     table.cell(t, 0, r, " " + k, text_color=C_LABEL, text_size=sz, text_halign=text.align_left,  bgcolor=C_PANEL)
     table.cell(t, 1, r, v + " ", text_color=vc,      text_size=sz, text_halign=text.align_right, bgcolor=C_PANEL)
 
+f_hi(table t, int r, string k, string v, color vc, string sz) =>
+    table.cell(t, 0, r, " " + k, text_color=C_LABEL, text_size=sz, text_halign=text.align_left,  bgcolor=color.new(#2a2e39, 30))
+    table.cell(t, 1, r, v + " ", text_color=vc,      text_size=sz, text_halign=text.align_right, bgcolor=color.new(#2a2e39, 30))
+
 f_sec(table t, int r, string k, string sz) =>
     table.cell(t, 0, r, " " + k, text_color=C_MUTED, text_size=sz, text_halign=text.align_left,  bgcolor=C_SECT)
     table.cell(t, 1, r, "",      text_color=C_MUTED, text_size=sz, text_halign=text.align_right, bgcolor=C_SECT)
@@ -1171,11 +1175,11 @@ if showCard and barstate.islast
         r += 1
         f_kv(card, r, "Direction", propDir > 0 ? "long" : propDir < 0 ? "short" : "none", propDir > 0 ? upCol : propDir < 0 ? dnCol : C_MUTED, tsz)
         r += 1
-        f_kv(card, r, "Confidence", f_meter((propConf - 50.0) / 45.0, 10) + " " + str.tostring(propConf, "#") + "%", C_VALUE, tsz)
+        f_kv(card, r, "Confidence", str.tostring(propConf, "#") + "%  " + f_meter((propConf - 50.0) / 45.0, 10), C_VALUE, tsz)
         r += 1
-        f_kv(card, r, "Gates passed", f_meter(float(gatesPassed) / float(gatesTotal), 10) + " " + str.tostring(gatesPassed) + "/" + str.tostring(gatesTotal), gatesPassed == gatesTotal ? C_GOOD : C_VALUE, tsz)
+        f_kv(card, r, "Gates passed", str.tostring(gatesPassed) + "/" + str.tostring(gatesTotal) + "  " + f_meter(float(gatesPassed) / float(gatesTotal), 10), gatesPassed == gatesTotal ? C_GOOD : C_VALUE, tsz)
         r += 1
-        f_kv(card, r, "Why no trade", gateOpen ? "ready" : vetoText, gateOpen ? C_GOOD : C_WARN, tsz)
+        f_hi(card, r, "Why no trade", gateOpen ? "ready to enter" : vetoText, gateOpen ? C_GOOD : C_WARN, tsz)
         r += 1
         f_kv(card, r, "Next size", qtyOk ? str.tostring(qty, "#.####") + " units" : "0 — equity too small for this stop", qtyOk ? C_VALUE : C_WARN, tsz)
         r += 1
@@ -1188,7 +1192,7 @@ if showCard and barstate.islast
     r += 1
     f_kv(card, r, "Warm-up", featuresValid ? "ready" : str.tostring(math.max(WARMUP_BARS - bar_index, 0)) + " bars left", featuresValid ? C_VALUE : C_WARN, tsz)
     r += 1
-    table.cell(card, 0, r, isModeA ? " Mode A — frozen" : " Mode B — strict " + str.tostring(strictIn), text_color=C_MUTED, text_size=tsz, text_halign=text.align_left, bgcolor=C_HEAD)
+    table.cell(card, 0, r, " " + syminfo.ticker + " " + timeframe.period + "  ·  " + (isModeA ? "Mode A" : "Mode B/" + str.tostring(strictIn)), text_color=C_MUTED, text_size=tsz, text_halign=text.align_left, bgcolor=C_HEAD)
     table.cell(card, 1, r, "NOT market-validated ", text_color=C_WARN, text_size=tsz, text_halign=text.align_right, bgcolor=C_HEAD)
 
 // ════════════════════════════════════════════════════════════════════════════

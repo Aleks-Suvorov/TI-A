@@ -36,6 +36,15 @@ CORE_BEGIN = "// ==== BEGIN SHARED CORE ===="
 CORE_END = "// ==== END SHARED CORE ===="
 
 
+def string_literals(path: Path) -> list[str]:
+    """Every double-quoted literal in the file, comments excluded."""
+    import re
+    out: list[str] = []
+    for line in path.read_text().splitlines():
+        out += re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', line.split("//")[0])
+    return out
+
+
 def core_of(path: Path) -> str:
     text = path.read_text()
     b = text.index(CORE_BEGIN)
@@ -180,15 +189,18 @@ def test_panel_names_every_diagnostic_field():
     not changed is the requirement that the panel account for its own state
     rather than just asserting one.
     """
-    text = (PINE / "TIA.pine").read_text()
+    # Compare against the panel's actual string literals rather than raw source
+    # bytes: a label written as " Confidence" for padding is still the field
+    # "Confidence", and a test that cannot see that is testing formatting.
+    labels = {s.strip() for s in string_literals(PINE / "TIA.pine")}
     required = ["Direction", "Confidence", "Gates passed", "Why no trade",
                 "Regime", "Setup", "Trend", "Higher timeframe", "Momentum",
                 "Volatility", "Liquidity", "Regime hazard", "Log-odds",
                 "Independent breadth", "Warm-up", "Stop / target"]
-    missing = [r for r in required if f'"{r}"' not in text]
+    missing = [r for r in required if r not in labels]
     assert not missing, f"status panel is missing rows: {missing}"
     for section in ("OPEN TRADE", "SIGNAL", "MARKET", "EVIDENCE"):
-        assert f'"{section}"' in text, f"panel is missing the {section} section"
+        assert section in labels, f"panel is missing the {section} section"
 
 
 def test_open_trade_panel_states_both_exits():
@@ -198,10 +210,10 @@ def test_open_trade_panel_states_both_exits():
     open the panel names the stop, the target, the bar limit and the reversal
     exit explicitly, plus the live result in R.
     """
-    text = (PINE / "TIA.pine").read_text()
+    labels = {s.strip() for s in string_literals(PINE / "TIA.pine")}
     for field in ("Stop — exit here", "Target — exit here", "Open result",
                   "Held", "Also closes on"):
-        assert f'"{field}"' in text, f"open-trade panel is missing '{field}'"
+        assert field in labels, f"open-trade panel is missing '{field}'"
 
 
 def test_trades_are_drawn_with_bar_anchored_objects():

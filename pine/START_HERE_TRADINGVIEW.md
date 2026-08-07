@@ -58,18 +58,23 @@ that tells you the state in two words — `NO TRADE`, `BUY NOW`, `HOLDING LONG`,
 `CLOSE LONG`. Under it, grouped sections:
 
 ```
- TI-A                        NO TRADE
- SIGNAL
- Direction                      short
- Confidence         ███████░░░    74%
- Gates passed       ████████░░   10/12
+ TI-A                            NO TRADE
+ SIGNAL ─────────────────────────────────
+ Direction                          short
+ Confidence               74%  █████░░░░░
+ Gates passed           10/12  ████████░░
  Why no trade      quiet regime, p=1.00
- MARKET
- Regime                   Quiet  100%
- Setup                 sweep reversal
- Trend                     up   t 1.1
- Mode B — strict 3   NOT market-validated
+ MARKET ─────────────────────────────────
+ Regime                       Quiet  100%
+ Setup                     sweep reversal
+ Trend                          up  t 1.1
+ NQ1! 5  ·  Mode B/3  NOT market-validated
 ```
+
+The number always comes before its bar. The **Confidence** bar runs from 50%
+(a coin flip, empty) to 95% (full), so 74% is a little over half a bar — hover
+the row for that note. It is not a probability of profit and nothing here
+claims it is. The **Gates passed** bar maps exactly: 10 of 12.
 
 The panel is pinned to the corner and does not move when you pan — it
 describes *now*, not a particular bar. Everything about a specific trade is
@@ -112,14 +117,14 @@ You do not have to work it out. While a trade is open the panel switches to an
 **OPEN TRADE** section that names every way it can end:
 
 ```
- TI-A                    HOLDING LONG
- OPEN TRADE
- Long from                   29502.00
- Stop — exit here            29418.00
- Target — exit here          29606.00
- Open result                   +0.42R
- Held                   3 of 30 bars
- Also closes on   reversal, or 30 bars
+ TI-A                        HOLDING LONG
+ OPEN TRADE ──────────────────────────────
+ Long from                        29502.00
+ Stop — exit here                 29418.00
+ Target — exit here               29606.00
+ Open result                        +0.42R
+ Held                         3 of 30 bars
+ Also closes on       reversal, or 30 bars
 ```
 
 So a position closes on exactly four things, and the panel shows all four:
@@ -127,6 +132,25 @@ the **stop**, the **target**, the **bar limit** (30 bars), or a **reversal
 signal** — the engines flipping direction against the open trade. Whichever
 happens first, the chart prints `SELL` (closing a long) or `COVER` (closing a
 short) with the reason and the result in R, and the exit alert fires.
+
+### Has it actually worked on this chart?
+
+Switch the **Status panel** to `Detailed` and the last section answers that,
+with the caveat attached rather than left for you to remember:
+
+```
+ THIS CHART ONLY — NOT EVIDENCE ──────────
+ Closed trades              14  ·  57% won
+ Average result                     +0.31R
+ Statistical weight     n = 14, needs ~400
+```
+
+That third row is the point. Fourteen trades cannot distinguish a real edge
+from a coin flip — the standard error on a 57% hit rate at n=14 is about 13
+percentage points. The panel shows you the number and, in the same breath, why
+you should not act on it. Getting to a sample that means something takes
+roughly 400 trades pooled across many instruments, which is what
+`docs/00-PREREGISTRATION.md` describes and what one chart cannot give you.
 
 ### How many signals to expect
 
